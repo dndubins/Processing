@@ -1,4 +1,4 @@
-Portlogger evolved as a sketch in the Processing language to receive data from the serial monitor and print it to a screen window, as well as write it to a log file in the same directory as the sketch.
+Portlogger.pde evolved as a sketch in the Processing language to receive data from the serial monitor and print it to a screen window, as well as write it to a log file in the same directory as the sketch.
 
 There is a little bit of an interface in the sketch to list the active ports if the port in the sketch is not found.
 
