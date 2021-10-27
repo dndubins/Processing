@@ -1,6 +1,6 @@
 // Serial logger (CSV format) for Arduino.
 // Written by: David Dubins
-// Last Updated: 5-Jun-2020
+// Last Updated: 26-Oct-2021
 // This sketch will save data collected on the selected com port in the same
 // directory as this sketch. Make sure each line of your transmitted data ends with a
 // new line (\n).
@@ -16,7 +16,8 @@ String portName = "COM4";  // to store the port name.
                            // program once to see a listing of available ports.
                            // Make sure your Serial Monitor/Serial Plotter
                            // is closed before running. Only one device can access
-                           // a COM port at a time.             
+                           // a COM port at a time.
+int serialBaud=9600;       // change to match baud rate of device
 //int portNum=0;           // to store the port number (not used here, alternate method)
 
 import processing.serial.*; // import the serial library in Processing
@@ -60,14 +61,14 @@ void setup() {
     text(pInfo,10,y+=yStep);
   }
   if(checkPort(portName)){  // if portName is a valid port
-    mySerial = new Serial(this, portName, 9600); // open the port
+    mySerial = new Serial(this, portName, serialBaud); // open the port
   }else{
     print("Could not open "+ portName+". "); // let user know stuff
     exit(); //leave the sketch
   }  
   //Alternately you can open up a Serial connection using the port number here:
   //portName=Serial.list()[portNum];  // get the name of the port
-  //mySerial = new Serial( this, Serial.list()[portNum], 9600 ); // the number in square brackets is the port number
+  //mySerial = new Serial( this, Serial.list()[portNum], serialBaud ); // the number in square brackets is the port number
   text("Saving serial data from "+ portName+" to " + filename + ".csv",10,y+=2*yStep); // let user know stuff
   text("Close this window to stop logging.",10,y+=yStep);
   textAlign(LEFT); 
