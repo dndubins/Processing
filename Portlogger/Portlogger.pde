@@ -17,7 +17,7 @@ String portName = "COM4";  // to store the port name.
                            // Make sure your Serial Monitor/Serial Plotter
                            // is closed before running. Only one device can access
                            // a COM port at a time.
-int serialBaud=9600;       // change to match baud rate of device
+int serialBaud=115200;     // change to match baud rate of device
 //int portNum=0;           // to store the port number (not used here, alternate method)
 
 import processing.serial.*; // import the serial library in Processing
@@ -69,7 +69,7 @@ void setup() {
   //Alternately you can open up a Serial connection using the port number here:
   //portName=Serial.list()[portNum];  // get the name of the port
   //mySerial = new Serial( this, Serial.list()[portNum], serialBaud ); // the number in square brackets is the port number
-  text("Saving serial data from "+ portName+" to " + filename + ".csv",10,y+=2*yStep); // let user know stuff
+  text("Saving serial data from "+ portName+" to " + filename + ".csv at "+serialBaud+" bps.",10,y+=2*yStep); // let user know stuff
   text("Close this window to stop logging.",10,y+=yStep);
   textAlign(LEFT); 
 }
@@ -137,7 +137,7 @@ void clearScreen(){
   background(255);          // set the background colour (0=black, 255=white)
   fill(50);                 // set text colour to dark grey (0=black, 255=white)
   y=0;                      // go back to top of screen
-  text("Saving serial data from "+ portName+" to " + filename + ".csv",10,y+=yStep);
+  text("Saving serial data from "+ portName+" to " + filename + ".csv at "+serialBaud+" bps.",10,y+=yStep);
   text("Close this window to stop logging.",10,y+=yStep);
 }
 
