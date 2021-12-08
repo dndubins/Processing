@@ -17,7 +17,7 @@ String portName = "COM4";  // to store the port name.
                            // Make sure your Serial Monitor/Serial Plotter
                            // is closed before running. Only one device can access
                            // a COM port at a time.
-int serialBaud=115200;     // change to match baud rate of device
+int serialBaud=9600;       // change to match baud rate of device
 //int portNum=0;           // to store the port number (not used here, alternate method)
 
 import processing.serial.*; // import the serial library in Processing
