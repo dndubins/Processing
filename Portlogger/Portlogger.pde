@@ -32,7 +32,7 @@ String ts;                  // used to hold time stamp string
 PrintWriter output;         // needed to print to a file
 int yStep=20;               // vertical spacing between output lines
 int xLim=700;               // width of Serial Monitor window
-int yLim=600;               // height of Serial Monitor window
+int yLim=620;               // height of Serial Monitor window
 
 void settings(){
   size(xLim,yLim);          // If you declare window size in settings(),
