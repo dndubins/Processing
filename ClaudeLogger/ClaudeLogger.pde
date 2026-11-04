@@ -712,13 +712,13 @@ String fit(String s, float maxW) {
 void mousePressed() {
   // An open dropdown gets the first claim on any click
   for (Dropdown d : dds) {
-    if (d.open) {
+    if (d.listOpen) {
       int r = d.overRow();
       if (r >= 0) {
         d.sel = r;
         if (d == baudDD) changeBaud();
       }
-      d.open = false;
+      d.listOpen = false;
       return;
     }
   }
@@ -727,12 +727,12 @@ void mousePressed() {
   boolean inSendBar = mouseY >= sendY && mouseY < sendY + sendH;
   if (!inSendBar) sendFocus = false;
   if (sendFieldOver()) { sendFocus = true; return; }
-  if (lineEndDD.overBox()) { lineEndDD.open = true; return; }
+  if (lineEndDD.overBox()) { lineEndDD.listOpen = true; return; }
   if (sendBtn.enabled && sendBtn.over()) { sendLine(); return; }
 
-  if (portDD.enabled && portDD.overBox()) { portDD.open = true; return; }
-  if (baudDD.overBox()) { baudDD.open = true; return; }
-  if (plotDD.enabled && plotDD.overBox()) { plotDD.open = true; return; }
+  if (portDD.enabled && portDD.overBox()) { portDD.listOpen = true; return; }
+  if (baudDD.overBox()) { baudDD.listOpen = true; return; }
+  if (plotDD.enabled && plotDD.overBox()) { plotDD.listOpen = true; return; }
 
   if (rescanBtn.enabled && rescanBtn.over()) { rescanPorts(); return; }
   if (connectBtn.over()) {
@@ -1112,7 +1112,7 @@ class Dropdown {
   int x, y, w, h;
   String[] items = new String[0];
   int sel = 0;
-  boolean open = false;
+  boolean listOpen = false;
   boolean enabled = true;
   int rowH = 24;
   boolean upward = false;        // true = list opens above the box (for widgets at the bottom)
@@ -1147,7 +1147,7 @@ class Dropdown {
   }
 
   void drawList() {
-    if (!open) return;
+    if (!listOpen) return;
     int r = overRow();
     for (int i = 0; i < items.length; i++) {
       int ry = listTop() + i * rowH;
@@ -1166,7 +1166,7 @@ class Dropdown {
   }
 
   int overRow() {
-    if (!open || mouseX < x || mouseX > x + w) return -1;
+    if (!listOpen || mouseX < x || mouseX > x + w) return -1;
     int top = listTop();
     if (mouseY < top) return -1;
     int r = (mouseY - top) / rowH;
