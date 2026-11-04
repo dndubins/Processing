@@ -12,6 +12,10 @@
 //  - Select text with click-drag (shift-click extends, double-click selects a line);
 //    Ctrl/Cmd+C copies the selection, Ctrl/Cmd+A selects everything, and the Copy
 //    button copies the selection (or all data lines if nothing is selected)
+//  - Send box with a line-ending dropdown (No line ending / Newline / Carriage return /
+//    Both NL & CR) for talking to devices that have a text menu. Sent text is echoed
+//    in the log (blue, "> " prefix) and, by default, written to the CSV too, so the
+//    file holds the whole transcript. Up/Down recall earlier messages.
 //  - Live plot of numeric columns (up to 8 channels, auto-scaling, adjustable window);
 //    click a legend entry to hide or show that channel (hidden channels are still logged)
 //  - Each Connect creates a new timestamped .csv in this sketch's folder
@@ -30,7 +34,7 @@
 
 import processing.serial.*;
 import java.awt.Toolkit;                     // for the system clipboard
-import java.awt.datatransfer.StringSelection;
+import java.awt.datatransfer.*;              // StringSelection, DataFlavor, Transferable
 
 // ---------------- Settings you might want to change ----------------
 int timeOut = 5;                 // seconds of silence before a "no data" notice is shown
@@ -42,6 +46,8 @@ int defaultBaudIndex = 4;        // index into baudRates (4 = 9600)
 int maxLines = 50000;            // lines kept on screen (the file keeps everything)
 int[] plotWindows = {100, 200, 500, 1000, 2000, 5000};  // selectable plot widths (samples)
 int defaultPlotWindowIndex = 3;  // 3 = 1000 samples
+boolean logSentToFile = true;    // also write text you send (with a "> " prefix) to the CSV
+int defaultLineEnding = 1;       // 0 = none, 1 = Newline, 2 = Carriage return, 3 = both
 int plotH = 280;                 // plot panel height in pixels
 
 // ---------------- Layout ----------------
@@ -49,11 +55,14 @@ int winW = 900;
 int winH = 760;
 int toolbarH = 76;
 int statusH = 44;
+int sendH = 36;                  // height of the send bar that sits above the status bar
+int sendY = winH - statusH - sendH;   // top of the send bar
+int sendFieldW = 622;            // width of the text entry box
 int pad = 10;
 int lineH = 18;
 int sbW = 14;                    // scrollbar width
 int logTop = toolbarH;           // these two change when the plot is shown/hidden
-int logH = winH - toolbarH - statusH;
+int logH = winH - toolbarH - statusH - sendH;
 int logW = winW - sbW;
 
 // ---------------- State ----------------
@@ -79,6 +88,12 @@ float charW = 8;                 // width of one monospace character (measured i
 String flashMsg = "";            // short message shown in the status bar (e.g. "Copied")
 int flashUntil = 0;
 
+// ---------------- Sending to the device ----------------
+String sendText = "";            // text currently typed in the send box
+boolean sendFocus = false;       // true when the send box has keyboard focus
+ArrayList<String> sendHistory = new ArrayList<String>();
+int histPos = 0;                 // position while browsing history with Up/Down
+
 // ---------------- Plot data ----------------
 int maxCh = 8;
 int plotCap = 5000;              // must be >= the largest value in plotWindows
@@ -92,14 +107,15 @@ boolean[] chHidden = new boolean[maxCh];   // channels hidden via the legend (ke
 
 PFont fontUI, fontMono;
 
-Dropdown portDD, baudDD, plotDD;
+Dropdown portDD, baudDD, plotDD, lineEndDD;
 Dropdown[] dds;
-Button rescanBtn, connectBtn, clearBtn, copyBtn;
+Button rescanBtn, connectBtn, clearBtn, copyBtn, sendBtn;
 Checkbox timeStampCB, autoScrollCB, plotCB;
 
 class LogLine {
   String text;
   boolean sys;                   // true = notice from this program, not device data
+  boolean sent = false;          // true = text you sent to the device
   LogLine(String t, boolean s) { text = t; sys = s; }
 }
 
@@ -119,7 +135,11 @@ void setup() {
   portDD = new Dropdown(50, 10, 240, 28);
   baudDD = new Dropdown(430, 10, 120, 28);
   plotDD = new Dropdown(435, 43, 90, 26);
-  dds = new Dropdown[] { portDD, baudDD, plotDD };
+  lineEndDD = new Dropdown(640, sendY + 5, 172, 26);
+  lineEndDD.upward = true;               // the bar is at the bottom, so its list opens upward
+  lineEndDD.setItems(new String[] { "No line ending", "Newline", "Carriage return", "Both NL & CR" });
+  lineEndDD.sel = defaultLineEnding;
+  dds = new Dropdown[] { portDD, baudDD, plotDD, lineEndDD };
 
   String[] b = new String[baudRates.length];
   for (int i = 0; i < b.length; i++) b[i] = str(baudRates[i]);
@@ -135,6 +155,7 @@ void setup() {
   connectBtn = new Button(565, 10, 110, 28, "Connect");
   clearBtn = new Button(690, 10, 70, 28, "Clear");
   copyBtn = new Button(770, 10, 70, 28, "Copy");
+  sendBtn = new Button(820, sendY + 5, 70, 26, "Send");
 
   timeStampCB = new Checkbox(10, 48, "Timestamp");
   timeStampCB.checked = timeStampDefault;
@@ -165,7 +186,8 @@ void draw() {
   drawScrollbar();
   drawToolbar();
   drawStatus();
-  cursor(legendHit() >= 0 ? HAND : ARROW);   // hand cursor over clickable legend entries
+  drawSendBar();
+  cursor(legendHit() >= 0 ? HAND : (sendFieldOver() ? TEXT : ARROW));   // hand cursor over clickable legend entries
   for (Dropdown d : dds) d.drawList();   // open lists are drawn last so they sit on top
 }
 
@@ -373,7 +395,7 @@ void parsePlot(String line) {
 // =====================================================================
 void updateLayout() {
   logTop = toolbarH + (plotCB.checked ? plotH : 0);
-  logH = winH - logTop - statusH;
+  logH = winH - logTop - statusH - sendH;
   firstLine = constrain(firstLine, 0, maxFirst());
   if (autoScrollCB.checked) firstLine = maxFirst();
 }
@@ -607,7 +629,7 @@ void drawLog() {
         rect(pad + a * charW, y, wd, lineH);
       }
     }
-    if (ln.sys) fill(170, 90, 0); else fill(30);
+    if (ln.sys) fill(170, 90, 0); else if (ln.sent) fill(20, 90, 170); else fill(30);
     text(ln.text, pad, y + lineH / 2);
   }
   noClip();
@@ -700,6 +722,13 @@ void mousePressed() {
       return;
     }
   }
+
+  // Send bar: clicking anywhere outside it drops keyboard focus from the text box
+  boolean inSendBar = mouseY >= sendY && mouseY < sendY + sendH;
+  if (!inSendBar) sendFocus = false;
+  if (sendFieldOver()) { sendFocus = true; return; }
+  if (lineEndDD.overBox()) { lineEndDD.open = true; return; }
+  if (sendBtn.enabled && sendBtn.over()) { sendLine(); return; }
 
   if (portDD.enabled && portDD.overBox()) { portDD.open = true; return; }
   if (baudDD.overBox()) { baudDD.open = true; return; }
@@ -890,6 +919,10 @@ void mouseWheel(processing.event.MouseEvent e) {
 }
 
 void keyPressed() {
+  if (sendFocus) {                       // typing goes to the send box
+    handleSendKey();
+    return;
+  }
   if (keyEvent != null && (keyEvent.isControlDown() || keyEvent.isMetaDown())) {
     if (keyCode == 67) {                                            // Ctrl/Cmd+C
       if (hasSelection()) {
@@ -913,6 +946,157 @@ void keyPressed() {
   }
 }
 
+// =====================================================================
+// Sending text to the device
+// =====================================================================
+boolean sendFieldOver() {
+  return mouseX >= 10 && mouseX <= 10 + sendFieldW && mouseY >= sendY + 5 && mouseY <= sendY + 31;
+}
+
+void drawSendBar() {
+  noStroke();
+  fill(235);
+  rect(0, sendY, winW, sendH);
+  stroke(190);
+  line(0, sendY, winW, sendY);
+
+  int fy = sendY + 5;
+  stroke(sendFocus ? color(30, 120, 200) : color(120));
+  fill(255);
+  rect(10, fy, sendFieldW, 26, 4);
+  noStroke();
+  textFont(fontMono, 14);
+  textAlign(LEFT, CENTER);
+  if (sendText.length() == 0 && !sendFocus) {
+    fill(150);
+    text(connected ? "Type text to send to the device, then press Enter"
+                   : "Connect to a port to send text", 18, fy + 12);
+  } else {
+    String disp = sendText;
+    while (disp.length() > 0 && textWidth(disp) > sendFieldW - 20) disp = disp.substring(1);
+    fill(30);
+    text(disp, 18, fy + 12);
+    if (sendFocus && (millis() / 500) % 2 == 0) {      // blinking caret
+      float cx = 18 + textWidth(disp);
+      stroke(30);
+      line(cx + 1, fy + 5, cx + 1, fy + 21);
+      noStroke();
+    }
+  }
+  textFont(fontUI, 14);
+
+  lineEndDD.drawBox();
+  sendBtn.enabled = connected;
+  sendBtn.show();
+}
+
+void sendLine() {
+  if (!connected || mySerial == null) {
+    flash("Connect to a port first.");
+    return;
+  }
+  String eol = "";
+  switch (lineEndDD.sel) {
+    case 1: eol = "\n"; break;
+    case 2: eol = "\r"; break;
+    case 3: eol = "\r\n"; break;
+  }
+  if (sendText.length() == 0 && eol.length() == 0) return;     // nothing to send
+  try {
+    mySerial.write(sendText + eol);
+  } catch (Exception e) {
+    sysMsg("Could not send. Check the connection.");
+    return;
+  }
+
+  // Echo into the log (and file) so the transcript shows both directions
+  String s = "> " + sendText;
+  if (timeStampCB.checked) {
+    s = nf(hour(), 2) + ":" + nf(minute(), 2) + ":" + nf(second(), 2) + ", " + s;
+  }
+  LogLine l = new LogLine(s, false);
+  l.sent = true;
+  log.add(l);
+  if (logSentToFile && output != null) {
+    output.println(s);
+    output.flush();
+  }
+
+  if (sendText.length() > 0
+      && (sendHistory.size() == 0 || !sendHistory.get(sendHistory.size() - 1).equals(sendText))) {
+    sendHistory.add(sendText);
+  }
+  histPos = sendHistory.size();
+  sendText = "";
+}
+
+void handleSendKey() {
+  boolean mod = keyEvent != null && (keyEvent.isControlDown() || keyEvent.isMetaDown());
+  if (key == ESC) {                      // Esc leaves the box instead of quitting the sketch
+    key = 0;
+    sendFocus = false;
+    return;
+  }
+  if (key == ENTER || key == RETURN) {
+    sendLine();
+    return;
+  }
+  if (key == BACKSPACE) {
+    if (sendText.length() > 0) sendText = sendText.substring(0, sendText.length() - 1);
+    return;
+  }
+  if (key == CODED) {
+    if (keyCode == UP) historyBack();
+    else if (keyCode == DOWN) historyForward();
+    return;
+  }
+  if (mod) {
+    if (keyCode == 86) pasteIntoField();                        // Ctrl/Cmd+V
+    return;
+  }
+  if (key >= ' ' && key <= '~') sendText += key;
+}
+
+void historyBack() {
+  if (sendHistory.size() == 0) return;
+  histPos = max(0, histPos - 1);
+  sendText = sendHistory.get(histPos);
+}
+
+void historyForward() {
+  if (histPos < sendHistory.size() - 1) {
+    histPos++;
+    sendText = sendHistory.get(histPos);
+  } else {
+    histPos = sendHistory.size();
+    sendText = "";
+  }
+}
+
+void pasteIntoField() {
+  try {
+    Transferable t = Toolkit.getDefaultToolkit().getSystemClipboard().getContents(null);
+    if (t != null && t.isDataFlavorSupported(DataFlavor.stringFlavor)) {
+      String s = (String) t.getTransferData(DataFlavor.stringFlavor);
+      int nl = s.indexOf('\n');
+      int cr = s.indexOf('\r');
+      int cut = (nl < 0) ? cr : (cr < 0 ? nl : min(nl, cr));
+      if (cut >= 0) {                    // a send is one line; keep only the first
+        s = s.substring(0, cut);
+        flash("Only the first line was pasted.");
+      }
+      StringBuilder clean = new StringBuilder();
+      for (int i = 0; i < s.length(); i++) {
+        char c = s.charAt(i);
+        if (c >= ' ' && c <= '~') clean.append(c);
+      }
+      sendText += clean.toString();
+    }
+  } catch (Exception e) {
+    flash("Could not read the clipboard.");
+  }
+}
+
 void exit() {                    // make sure the file closes
   disconnect();
   if (filename.length() > 0) {
@@ -931,6 +1115,11 @@ class Dropdown {
   boolean open = false;
   boolean enabled = true;
   int rowH = 24;
+  boolean upward = false;        // true = list opens above the box (for widgets at the bottom)
+
+  int listTop() {
+    return upward ? y - items.length * rowH : y + h;
+  }
 
   Dropdown(int x, int y, int w, int h) {
     this.x = x; this.y = y; this.w = w; this.h = h;
@@ -961,7 +1150,7 @@ class Dropdown {
     if (!open) return;
     int r = overRow();
     for (int i = 0; i < items.length; i++) {
-      int ry = y + h + i * rowH;
+      int ry = listTop() + i * rowH;
       stroke(120);
       fill(i == r ? color(200, 220, 245) : (i == sel ? color(235, 242, 250) : 255));
       rect(x, ry, w, rowH);
@@ -977,8 +1166,10 @@ class Dropdown {
   }
 
   int overRow() {
-    if (!open || mouseX < x || mouseX > x + w || mouseY < y + h) return -1;
-    int r = (mouseY - (y + h)) / rowH;
+    if (!open || mouseX < x || mouseX > x + w) return -1;
+    int top = listTop();
+    if (mouseY < top) return -1;
+    int r = (mouseY - top) / rowH;
     return (r >= 0 && r < items.length) ? r : -1;
   }
 }
