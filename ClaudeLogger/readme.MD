@@ -1,4 +1,4 @@
-# ClaudePlotter
+# ClaudeLogger
 
 A serial data logger, scrolling monitor and live plotter for Arduino (and any other device that prints lines of text over a serial port), written in [Processing](https://processing.org/).
 
@@ -6,7 +6,7 @@ I uploaded PortLogger to Claude.AI and said "how nuts can we go?" The results ar
 
 With a few prompts, you can select ports, scroll through logging output, auto scroll, and plot the data in real time.
 
-<!-- TODO: add a screenshot of the window with a couple of channels plotting, e.g. ![ClaudePlotter screenshot](screenshot.png) -->
+<!-- TODO: add a screenshot of the window with a couple of channels plotting, e.g. ![ClaudeLogger screenshot](screenshot.png) -->
 
 ## Features
 
@@ -25,7 +25,7 @@ With a few prompts, you can select ports, scroll through logging output, auto sc
 
 ## Quick start
 
-1. Download `ClaudePlotter.pde` and put it in a folder named `ClaudePlotter`. Processing requires the folder name to match the `.pde` file name.
+1. Download `ClaudeLogger.pde` and put it in a folder named `ClaudeLogger`. Processing requires the folder name to match the `.pde` file name.
 2. Open the file in Processing and press Run.
 3. Choose your port and baud rate (match the `Serial.begin()` value in your Arduino sketch) and press **Connect**.
 4. **Close the Arduino IDE's Serial Monitor and Serial Plotter first.** Only one program can use a port at a time.
