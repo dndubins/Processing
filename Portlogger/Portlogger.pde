@@ -1,22 +1,24 @@
 // Serial logger (CSV format) for Arduino.
 // Written by: David Dubins
-// Last Updated: 04-Nov-2026
-// Serial port selection menu drawPortList() added using Claude.AI Sonnet 5.5 Medium
+// Last Updated: 26-Oct-2021
 // This sketch will save data collected on the selected com port in the same
 // directory as this sketch. Make sure each line of your transmitted data ends with a
 // new line (\n).
 
 int timeOut=61;             // max #seconds to timeout the monitor. Set this to be
-                            // greater than the largest interval you are expecting
-                            // between measurements (at least 3xsampling interval 
-                            // to be safe).
-boolean timeStamp=false;    // if you'd like to add a timestamp to the incoming data
-String portName = "";       // to store the port name.
-                            // Make sure your Serial Monitor/Serial Plotter
-                            // is closed before running. Only one device can access
-                            // a COM port at a time.
-boolean portSelected=false; // keep track of port being selected
-int serialBaud=9600;        // change to match baud rate of device
+                           // greater than the largest interval you are expecting
+                           // between measurements (at least 3xsampling interval 
+                           // to be safe).
+boolean timeStamp=true;   // if you'd like to add a timestamp to the incoming data
+String portName = "COM4";  // to store the port name.
+                           // Enter the port name that your MCU is connected to.
+                           // Look in the Arduino IDE port list, or run this
+                           // program once to see a listing of available ports.
+                           // Make sure your Serial Monitor/Serial Plotter
+                           // is closed before running. Only one device can access
+                           // a COM port at a time.
+int serialBaud=9600;       // change to match baud rate of device
+//int portNum=0;           // to store the port number (not used here, alternate method)
 
 import processing.serial.*; // import the serial library in Processing
 Serial mySerial;            // declare a device called mySerial
@@ -30,20 +32,17 @@ String ts;                  // used to hold time stamp string
 PrintWriter output;         // needed to print to a file
 int yStep=20;               // vertical spacing between output lines
 int xLim=700;               // width of Serial Monitor window
-int yLim=650;               // height of Serial Monitor window
+int yLim=600;               // height of Serial Monitor window
 
 void settings(){
   size(xLim,yLim);          // If you declare window size in settings(),
 }                           // you get to declare the dimensions as variables.
 
 void setup() {
+  filename = year() + nf(month(),2) + nf (day(),2) + "-" + nf(hour(),2) + nf(minute(),2) + nf(second(),2);
+  output = createWriter( filename + ".csv" );  // can change to .CSV here
   f = createFont("Arial",16,true); // Arial, 16 point, anti-aliasing on
   textFont(f,16);           // set the font
-  textAlign(LEFT);
-  println("Available ports:");
-  printArray(Serial.list());
-  drawPortList("");
-  /*
   background(255);          // set the background colour (0=black, 255=white)
   fill(50);                 // set text colour to dark grey (0=black, 255=white)
                             // you can use r,g,b colours in processing
@@ -55,18 +54,27 @@ void setup() {
   text("Available ports:",10,y+=yStep);
   numPorts=Serial.list().length;
   for(int i=0;i<numPorts;i++){
-    text("["+i+"] "+Serial.list()[i],10,y+=yStep);
+    String pInfo="["+i+"] "+Serial.list()[i];
+    if(Serial.list()[i].equals(portName)){
+      pInfo+=" <- PORT SELECTED";
+    }
+    text(pInfo,10,y+=yStep);
   }
-  if(numPorts==0){
-    text("No serial ports found. Plug in your device and restart.",10,y+=2*yStep);
+  if(checkPort(portName)){  // if portName is a valid port
+    mySerial = new Serial(this, portName, serialBaud); // open the port
   }else{
-    text("Press the number key of the port you want to log.",10,y+=2*yStep);
-  }*/
-
+    print("Could not open "+ portName+". "); // let user know stuff
+    exit(); //leave the sketch
+  }  
+  //Alternately you can open up a Serial connection using the port number here:
+  //portName=Serial.list()[portNum];  // get the name of the port
+  //mySerial = new Serial( this, Serial.list()[portNum], serialBaud ); // the number in square brackets is the port number
+  text("Saving serial data from "+ portName+" to " + filename + ".csv at "+serialBaud+" bps.",10,y+=2*yStep); // let user know stuff
+  text("Close this window to stop logging.",10,y+=yStep);
+  textAlign(LEFT); 
 }
 
 void draw() {
-  if(!portSelected) return;   // wait until a port has been chosen
   while(mySerial.available()>0) {
     String value="";
     char x=0;
@@ -107,72 +115,38 @@ void draw() {
 }
 
 void exit() {                //make sure the file closes
-  if(output!=null){
-    output.flush();
-    output.close();
-    println("Saved log file: "+sketchPath(filename+".csv")+". You may now close Processing.");
+  output.flush();
+  output.close();
+  if(checkPort(portName)){   // if the portName is valid
+    println("Saved log file: "+filename+".csv. You may now close Processing.");
+  }else{
+    println(" Please change portName to one of the ports listed above.");
+    println("Make sure your Serial Monitor/Plotter is closed.");
   }
   super.exit();
 }
 
-void keyPressed() {
-  if(portSelected) return;
-  int sel = key - '0';
-  if(sel>=0 && sel<=9 && sel<numPorts){
-    String candidate = Serial.list()[sel];
-    try {
-      mySerial = new Serial(this, candidate, serialBaud);
-    } catch (Exception e) {
-      mySerial = null;
-      drawPortList("Could not open "+candidate+". Close any Serial Monitor/Plotter using it, then pick again.");
-      return;
-    }
-    // Port opened successfully, so now create the file
-    portName = candidate;
-    filename = year() + nf(month(),2) + nf(day(),2) + "-" + nf(hour(),2) + nf(minute(),2) + nf(second(),2);
-    output = createWriter(filename + ".csv");
-    background(255);
-    fill(50);
-    y=0;
-    text("Saving serial data from "+portName+" to "+filename+".csv at "+serialBaud+" bps.",10,y+=yStep);
-    text("Log file path: "+sketchPath(filename+".csv"),10,y+=yStep);
-    text("Close this window to stop logging.",10,y+=yStep);
-    t=millis();
-    portSelected=true;
-  }else if(numPorts==0){
-    drawPortList("");                 // any key rescans when no ports were found
-  }
-}
+/*void keyPressed() {  // uncomment for a "Press any key to stop logging" routine
+  output.flush();
+  output.close();
+  println("Saved log file: "+filename+".csv. You may now close Processing.");
+  super.exit();
+}*/
 
 void clearScreen(){
   background(255);          // set the background colour (0=black, 255=white)
   fill(50);                 // set text colour to dark grey (0=black, 255=white)
   y=0;                      // go back to top of screen
   text("Saving serial data from "+ portName+" to " + filename + ".csv at "+serialBaud+" bps.",10,y+=yStep);
-  text("Log file path: "+sketchPath(filename+".csv"),10,y+=yStep);
   text("Close this window to stop logging.",10,y+=yStep);
 }
 
-void drawPortList(String msg) {
-  background(255);          // set the background colour (0=black, 255=white)
-  fill(50);                 // set text colour to dark grey (0=black, 255=white)
-                            // you can use r,g,b colours in processing
-                            // Use https://www.google.com/search?q=color+picker
-                            // to pick your colours. e.g. fill(212,15,15) is red.
-  y=0;                      // start at the top of the screen
-  numPorts=Serial.list().length;      // refresh, in case a device was plugged in
-  text("Available ports:",10,y+=yStep);
+boolean checkPort(String pname){
+  boolean found=false;
   for(int i=0;i<numPorts;i++){
-    text("["+i+"] "+Serial.list()[i],10,y+=yStep);
+    if(Serial.list()[i].equals(pname)){  //if pname exists, return true
+      return true;          // .equals() command in processing compares two strings.
+    }
   }
-  if(numPorts==0){
-    text("No serial ports found. Plug in your device and press any key to rescan.",10,y+=2*yStep);
-  }else{
-    text("Press the number key of the port you want to log.",10,y+=2*yStep);
-  }
-  if(msg.length()>0){
-    fill(200,0,0);                    // red error text
-    text(msg,10,y+=2*yStep);
-    fill(50);
-  }
+  return false;             // otherwise, return false
 }
