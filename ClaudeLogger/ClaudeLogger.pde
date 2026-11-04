@@ -37,7 +37,7 @@ import java.awt.Toolkit;                     // for the system clipboard
 import java.awt.datatransfer.*;              // StringSelection, DataFlavor, Transferable
 
 // ---------------- Settings you might want to change ----------------
-int timeOut = 5;                 // seconds of silence before a "no data" notice is shown
+int timeOut = 61;                // seconds of silence before a "no data" notice is shown
 boolean timeStampDefault = false;
 boolean plotDefault = true;      // show the live plot at start-up
 int[] baudRates = {300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 74880,
