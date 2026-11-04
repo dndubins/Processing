@@ -122,12 +122,13 @@ class LogLine {
 // =====================================================================
 void settings() {
   size(winW, winH);
+  pixelDensity(displayDensity());
 }
 
 void setup() {
   surface.setTitle("Claude Logger");
   fontUI = createFont("SansSerif", 14, true);
-  fontMono = createFont("Monospaced", 14, true);
+  fontMono = createFont("Monospaced Bold", 14, true);
   textFont(fontMono, 14);
   charW = textWidth("M");        // monospace, so every character is this wide
   textFont(fontUI, 14);
