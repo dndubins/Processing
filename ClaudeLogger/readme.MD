@@ -1,4 +1,4 @@
-# ClaudeLogger
+# ClaudePlotter
 
 A serial data logger, scrolling monitor and live plotter for Arduino (and any other device that prints lines of text over a serial port), written in [Processing](https://processing.org/).
 
@@ -6,7 +6,7 @@ I uploaded PortLogger to Claude.AI and said "how nuts can we go?" The results ar
 
 With a few prompts, you can select ports, scroll through logging output, auto scroll, and plot the data in real time.
 
-<!-- TODO: add a screenshot of the window with a couple of channels plotting, e.g. ![ClaudeLogger screenshot](screenshot.png) -->
+<!-- TODO: add a screenshot of the window with a couple of channels plotting, e.g. ![ClaudePlotter screenshot](screenshot.png) -->
 
 ## Features
 
@@ -15,6 +15,7 @@ With a few prompts, you can select ports, scroll through logging output, auto sc
 - **Scrollable history.** Scroll back through everything received with the mouse wheel, the scrollbar, or the keyboard. Autoscroll follows new data and turns itself off when you scroll up (and back on when you reach the bottom), like the Arduino IDE's Serial Monitor.
 - **Timestamp tick box.** Optionally add a `HH:MM:SS` timestamp to every line, on screen and in the file.
 - **Select and copy.** Click and drag to select text from the log, then copy it to paste into a spreadsheet or document.
+- **Send text to the device.** A send box at the bottom works like the Arduino IDE's Serial Monitor, with a line-ending dropdown (No line ending, Newline, Carriage return, or Both NL & CR). It's handy for devices that present a text menu, and what you send is shown in the log and saved in the CSV, so the file holds the whole conversation.
 - **Live plot.** Numeric columns are plotted in real time, up to 8 channels, with automatic Y scaling and an adjustable window (100 to 5000 samples). Click a legend entry to hide or show a channel.
 
 ## Requirements
@@ -24,7 +25,7 @@ With a few prompts, you can select ports, scroll through logging output, auto sc
 
 ## Quick start
 
-1. Download `ClaudeLogger.pde` and put it in a folder named `ClaudeLogger`. Processing requires the folder name to match the `.pde` file name.
+1. Download `ClaudePlotter.pde` and put it in a folder named `ClaudePlotter`. Processing requires the folder name to match the `.pde` file name.
 2. Open the file in Processing and press Run.
 3. Choose your port and baud rate (match the `Serial.begin()` value in your Arduino sketch) and press **Connect**.
 4. **Close the Arduino IDE's Serial Monitor and Serial Plotter first.** Only one program can use a port at a time.
@@ -42,6 +43,7 @@ Each line your device sends should end with a newline, which `Serial.println()` 
 | Select all | Ctrl+A (Cmd+A on a Mac) |
 | Copy button | Copies the selection, or every data line if nothing is selected |
 | Clear | Clears the screen and the plot (the CSV file is not affected) |
+| Send text to the device | Click the box at the bottom, type, and press Enter (or click Send). Choose the line ending from the dropdown. Up / Down recall earlier messages, and Esc leaves the box |
 | Hide / show a plot channel | Click its entry in the legend |
 
 ## What the plot understands
@@ -82,6 +84,7 @@ void loop() {
 - The window keeps the most recent 50,000 lines. The CSV file keeps everything.
 - If no data arrives for 5 seconds, a notice appears in the log (notices are shown in orange and are never written to the file).
 - Non-printable characters, including tabs, are dropped from incoming lines.
+- Text you send is shown in blue with a `> ` prefix and, by default, is also written to the CSV. Set `logSentToFile = false` near the top of the sketch if you want the file to hold device data only.
 - A few settings (default baud rate, timeout, number of lines kept, plot sizes) are near the top of the sketch.
 
 ### Mac and Linux notes
@@ -95,9 +98,8 @@ If something doesn't work on your system, please open an issue and include the t
 
 ## Credits
 
-Written by Claude.AI (Sonnet 5.5), prompted by and tested with a real Arduino. Based on the original serial logger by David Dubins.
+Created by David Dubins, extended with Claude.AI (Sonnet 5.5) from his original serial logger.
 
 ## License
 
 MIT License. Copyright (c) 2026 David Dubins. See the [LICENSE](LICENSE) file for details.
-
