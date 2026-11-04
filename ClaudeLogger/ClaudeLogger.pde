@@ -7,11 +7,19 @@
 // Features:
 //  - Port and baud rate dropdown menus (baud can be changed while connected)
 //  - Connect / Disconnect and Rescan buttons
-//  - Timestamp and Autoscroll tick boxes
+//  - Timestamp, Autoscroll and Plot tick boxes
 //  - Scrollable history: mouse wheel, scrollbar (click/drag), Up/Down/PgUp/PgDn/Home/End
+//  - Live plot of numeric columns (up to 8 channels, auto-scaling, adjustable window)
 //  - Each Connect creates a new timestamped .csv in this sketch's folder
 //  - Everything received is written to the file, even lines that scroll out of the
 //    on-screen history.
+//
+// Plot input formats (one sample per line):
+//    12.5,30,7.1            comma/semicolon separated columns
+//    12.5 30 7.1            space separated columns
+//    temp:12.5,hum:30       "name:value" pairs (names are used in the legend)
+//    temp,hum,pressure      a header line of names (only read before the first data line)
+// Columns that aren't numbers leave a gap in that channel's line.
 //
 // Make sure each line of your transmitted data ends with a new line (\n).
 // Close any Serial Monitor/Plotter before connecting: only one program can use a port.
@@ -21,20 +29,24 @@ import processing.serial.*;
 // ---------------- Settings you might want to change ----------------
 int timeOut = 5;                 // seconds of silence before a "no data" notice is shown
 boolean timeStampDefault = false;
+boolean plotDefault = true;      // show the live plot at start-up
 int[] baudRates = {300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 74880,
                    115200, 230400, 250000, 500000, 1000000, 2000000};
 int defaultBaudIndex = 4;        // index into baudRates (4 = 9600)
 int maxLines = 50000;            // lines kept on screen (the file keeps everything)
+int[] plotWindows = {100, 200, 500, 1000, 2000, 5000};  // selectable plot widths (samples)
+int defaultPlotWindowIndex = 3;  // 3 = 1000 samples
+int plotH = 280;                 // plot panel height in pixels
 
 // ---------------- Layout ----------------
 int winW = 900;
-int winH = 700;
+int winH = 760;
 int toolbarH = 76;
 int statusH = 44;
 int pad = 10;
 int lineH = 18;
 int sbW = 14;                    // scrollbar width
-int logTop = toolbarH;
+int logTop = toolbarH;           // these two change when the plot is shown/hidden
 int logH = winH - toolbarH - statusH;
 int logW = winW - sbW;
 
@@ -53,12 +65,22 @@ int lastRx = 0;
 boolean draggingThumb = false;
 int dragOffset = 0;
 
+// ---------------- Plot data ----------------
+int maxCh = 8;
+int plotCap = 5000;              // must be >= the largest value in plotWindows
+float[][] plotBuf = new float[maxCh][plotCap];
+long plotTotal = 0;              // total samples received (ring buffer position)
+int nCh = 0;                     // number of channels seen so far
+String[] chName = new String[maxCh];
+int[] chColor = {0xFF1F77B4, 0xFFFF7F0E, 0xFF2CA02C, 0xFFD62728,
+                 0xFF9467BD, 0xFF8C564B, 0xFFE377C2, 0xFF7F7F7F};
+
 PFont fontUI, fontMono;
 
-Dropdown portDD, baudDD;
+Dropdown portDD, baudDD, plotDD;
 Dropdown[] dds;
 Button rescanBtn, connectBtn, clearBtn;
-Checkbox timeStampCB, autoScrollCB;
+Checkbox timeStampCB, autoScrollCB, plotCB;
 
 class LogLine {
   String text;
@@ -72,18 +94,24 @@ void settings() {
 }
 
 void setup() {
-  surface.setTitle("Serial Logger");
+  surface.setTitle("Claude Logger");
   fontUI = createFont("SansSerif", 14, true);
   fontMono = createFont("Monospaced", 14, true);
 
   portDD = new Dropdown(50, 10, 240, 28);
   baudDD = new Dropdown(430, 10, 120, 28);
-  dds = new Dropdown[] { portDD, baudDD };
+  plotDD = new Dropdown(435, 43, 90, 26);
+  dds = new Dropdown[] { portDD, baudDD, plotDD };
 
   String[] b = new String[baudRates.length];
   for (int i = 0; i < b.length; i++) b[i] = str(baudRates[i]);
   baudDD.setItems(b);
   baudDD.sel = defaultBaudIndex;
+
+  String[] w = new String[plotWindows.length];
+  for (int i = 0; i < w.length; i++) w[i] = str(plotWindows[i]);
+  plotDD.setItems(w);
+  plotDD.sel = defaultPlotWindowIndex;
 
   rescanBtn = new Button(298, 10, 70, 28, "Rescan");
   connectBtn = new Button(565, 10, 110, 28, "Connect");
@@ -93,7 +121,11 @@ void setup() {
   timeStampCB.checked = timeStampDefault;
   autoScrollCB = new Checkbox(150, 48, "Autoscroll");
   autoScrollCB.checked = true;
+  plotCB = new Checkbox(290, 48, "Plot");
+  plotCB.checked = plotDefault;
+  plotDD.enabled = plotCB.checked;
 
+  updateLayout();
   rescanPorts();
   sysMsg("Pick a port and baud rate, then press Connect.");
 }
@@ -103,12 +135,13 @@ void draw() {
   if (autoScrollCB.checked) firstLine = maxFirst();
 
   background(255);
+  textFont(fontUI, 14);
+  drawPlot();
   drawLog();
   drawScrollbar();
   drawToolbar();
   drawStatus();
-  portDD.drawList();             // open lists are drawn last so they sit on top
-  baudDD.drawList();
+  for (Dropdown d : dds) d.drawList();   // open lists are drawn last so they sit on top
 }
 
 // =====================================================================
@@ -148,6 +181,7 @@ void readSerial() {
 }
 
 void addDataLine(String line) {
+  parsePlot(line);                       // plot uses the raw line, without any timestamp
   String s = line;
   if (timeStampCB.checked) {
     s = nf(hour(), 2) + ":" + nf(minute(), 2) + ":" + nf(second(), 2) + ", " + line;
@@ -197,6 +231,7 @@ void connect() {
   output = createWriter(filename + ".csv");
   rx.setLength(0);
   lastRx = millis();
+  resetPlot(true);                       // new session = fresh plot
   connected = true;
   connectBtn.label = "Disconnect";
   portDD.enabled = false;
@@ -238,8 +273,81 @@ void changeBaud() {
 }
 
 // =====================================================================
-// Scrolling helpers
+// Plot data
 // =====================================================================
+void resetPlot(boolean clearNames) {
+  plotTotal = 0;
+  nCh = 0;
+  if (clearNames) {
+    for (int c = 0; c < maxCh; c++) chName[c] = null;
+  }
+}
+
+float sample(int c, long absIdx) {
+  return plotBuf[c][(int) (absIdx % plotCap)];
+}
+
+void parsePlot(String line) {
+  boolean delim = line.indexOf(',') >= 0 || line.indexOf(';') >= 0;
+  String[] tok = delim ? line.split("[,;]", -1) : line.trim().split("\\s+");
+  int n = min(tok.length, maxCh);
+  float[] vals = new float[n];
+  String[] names = new String[n];
+  boolean any = false;
+
+  for (int i = 0; i < n; i++) {
+    String t = tok[i].trim();
+    int colon = t.indexOf(':');
+    if (colon > 0) {                     // "name:value"
+      names[i] = t.substring(0, colon).trim();
+      t = t.substring(colon + 1).trim();
+    }
+    float v = Float.NaN;
+    if (t.length() > 0) {
+      try {
+        v = Float.parseFloat(t);
+      } catch (NumberFormatException e) {
+        // not a number: leave as NaN
+      }
+    }
+    if (Float.isInfinite(v)) v = Float.NaN;
+    if (!Float.isNaN(v)) any = true;
+    vals[i] = v;
+  }
+
+  if (!any) {
+    // A line of names before any data can serve as a header
+    if (delim && plotTotal == 0 && tok.length <= maxCh) {
+      for (int i = 0; i < tok.length; i++) {
+        String h = tok[i].trim();
+        if (h.length() > 0) chName[i] = h;
+      }
+    }
+    return;
+  }
+
+  int idx = (int) (plotTotal % plotCap);
+  for (int c = 0; c < maxCh; c++) {
+    plotBuf[c][idx] = (c < n) ? vals[c] : Float.NaN;
+  }
+  for (int c = 0; c < n; c++) {
+    if (names[c] != null) chName[c] = names[c];
+    else if (chName[c] == null) chName[c] = "ch" + (c + 1);
+  }
+  nCh = max(nCh, n);
+  plotTotal++;
+}
+
+// =====================================================================
+// Layout / scrolling helpers
+// =====================================================================
+void updateLayout() {
+  logTop = toolbarH + (plotCB.checked ? plotH : 0);
+  logH = winH - logTop - statusH;
+  firstLine = constrain(firstLine, 0, maxFirst());
+  if (autoScrollCB.checked) firstLine = maxFirst();
+}
+
 int visibleLines() {
   return max(1, (logH - 8) / lineH);
 }
@@ -268,6 +376,128 @@ int thumbY() {
 // =====================================================================
 // Drawing
 // =====================================================================
+String fmt(float v) {
+  float a = abs(v);
+  if (a >= 1000) return String.format("%.0f", v);
+  if (a >= 100) return String.format("%.1f", v);
+  return String.format("%.2f", v);
+}
+
+void drawPlot() {
+  if (!plotCB.checked) return;
+  int top = toolbarH;
+  noStroke();
+  fill(248);
+  rect(0, top, winW, plotH);
+  stroke(190);
+  line(0, top + plotH, winW, top + plotH);
+
+  int px = 64, py = top + 14;
+  int pw = winW - px - 130, ph = plotH - 14 - 28;
+  stroke(150);
+  noFill();
+  rect(px, py, pw, ph);
+
+  textFont(fontUI, 12);
+  int win = plotWindows[plotDD.sel];
+  int n = (int) min((long) win, plotTotal);
+  if (n == 0 || nCh == 0) {
+    noStroke();
+    fill(140);
+    textAlign(CENTER, CENTER);
+    text("Waiting for numeric data...", px + pw / 2, py + ph / 2);
+    textFont(fontUI, 14);
+    return;
+  }
+  long start = plotTotal - n;
+
+  // Auto-scale to the data in view
+  float lo = Float.MAX_VALUE, hi = -Float.MAX_VALUE;
+  for (int c = 0; c < nCh; c++) {
+    for (int k = 0; k < n; k++) {
+      float v = sample(c, start + k);
+      if (!Float.isNaN(v)) {
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+    }
+  }
+  if (lo > hi) {                         // everything in view is a gap
+    textFont(fontUI, 14);
+    return;
+  }
+  if (hi - lo < 1e-9) {
+    lo -= 1;
+    hi += 1;
+  } else {
+    float padY = (hi - lo) * 0.05;
+    lo -= padY;
+    hi += padY;
+  }
+
+  // Grid lines and y-axis labels
+  textAlign(RIGHT, CENTER);
+  for (int i = 0; i <= 4; i++) {
+    float gy = py + ph * i / 4.0;
+    float val = lerp(hi, lo, i / 4.0);
+    stroke(225);
+    line(px, gy, px + pw, gy);
+    noStroke();
+    fill(90);
+    text(fmt(val), px - 6, gy);
+  }
+
+  // Traces (decimated if there are many more samples than pixels)
+  clip(px, py, pw, ph);
+  noFill();
+  strokeWeight(1.5);
+  int stride = max(1, n / (2 * pw));
+  for (int c = 0; c < nCh; c++) {
+    stroke(chColor[c]);
+    boolean drawing = false;
+    int k = 0;
+    while (true) {
+      float v = sample(c, start + k);
+      if (Float.isNaN(v)) {
+        if (drawing) { endShape(); drawing = false; }
+      } else {
+        if (!drawing) { beginShape(); drawing = true; }
+        vertex(px + pw * k / (float) max(1, win - 1), py + ph - (v - lo) / (hi - lo) * ph);
+      }
+      if (k >= n - 1) break;
+      k = min(n - 1, k + stride);
+    }
+    if (drawing) endShape();
+  }
+  strokeWeight(1);
+  noClip();
+
+  // Legend with the latest value of each channel
+  int lx = px + pw + 14;
+  for (int c = 0; c < nCh; c++) {
+    int ly = py + 10 + c * 26;
+    stroke(chColor[c]);
+    strokeWeight(3);
+    line(lx, ly, lx + 14, ly);
+    strokeWeight(1);
+    float latest = sample(c, plotTotal - 1);
+    String lbl = chName[c] + ": " + (Float.isNaN(latest) ? "-" : fmt(latest));
+    noStroke();
+    fill(30);
+    textAlign(LEFT, CENTER);
+    text(fit(lbl, winW - lx - 22 - 6), lx + 20, ly);
+  }
+
+  // Footer
+  noStroke();
+  fill(110);
+  textAlign(LEFT, TOP);
+  text("Window: " + win + " samples", px, py + ph + 6);
+  textAlign(RIGHT, TOP);
+  text("Samples received: " + plotTotal, px + pw, py + ph + 6);
+  textFont(fontUI, 14);
+}
+
 void drawLog() {
   clip(0, logTop, logW, logH);
   textFont(fontMono, 14);
@@ -307,6 +537,9 @@ void drawToolbar() {
   textAlign(LEFT, CENTER);
   text("Port:", pad, 24);
   text("Baud:", 385, 24);
+  fill(plotCB.checked ? 30 : 150);
+  text("Window:", 372, 56);
+  text("samples", 532, 56);
 
   portDD.drawBox();
   rescanBtn.show();
@@ -315,6 +548,8 @@ void drawToolbar() {
   clearBtn.show();
   timeStampCB.show();
   autoScrollCB.show();
+  plotCB.show();
+  plotDD.drawBox();
 }
 
 void drawStatus() {
@@ -360,6 +595,7 @@ void mousePressed() {
 
   if (portDD.enabled && portDD.overBox()) { portDD.open = true; return; }
   if (baudDD.overBox()) { baudDD.open = true; return; }
+  if (plotDD.enabled && plotDD.overBox()) { plotDD.open = true; return; }
 
   if (rescanBtn.enabled && rescanBtn.over()) { rescanPorts(); return; }
   if (connectBtn.over()) {
@@ -369,12 +605,19 @@ void mousePressed() {
   if (clearBtn.over()) {
     log.clear();
     firstLine = 0;
+    resetPlot(false);                    // keep channel names
     return;
   }
   if (timeStampCB.over()) { timeStampCB.checked = !timeStampCB.checked; return; }
   if (autoScrollCB.over()) {
     autoScrollCB.checked = !autoScrollCB.checked;
     if (autoScrollCB.checked) firstLine = maxFirst();
+    return;
+  }
+  if (plotCB.over()) {
+    plotCB.checked = !plotCB.checked;
+    plotDD.enabled = plotCB.checked;
+    updateLayout();
     return;
   }
 
