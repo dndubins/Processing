@@ -9,7 +9,11 @@
 //  - Connect / Disconnect and Rescan buttons
 //  - Timestamp, Autoscroll and Plot tick boxes
 //  - Scrollable history: mouse wheel, scrollbar (click/drag), Up/Down/PgUp/PgDn/Home/End
-//  - Live plot of numeric columns (up to 8 channels, auto-scaling, adjustable window)
+//  - Select text with click-drag (shift-click extends, double-click selects a line);
+//    Ctrl/Cmd+C copies the selection, Ctrl/Cmd+A selects everything, and the Copy
+//    button copies the selection (or all data lines if nothing is selected)
+//  - Live plot of numeric columns (up to 8 channels, auto-scaling, adjustable window);
+//    click a legend entry to hide or show that channel (hidden channels are still logged)
 //  - Each Connect creates a new timestamped .csv in this sketch's folder
 //  - Everything received is written to the file, even lines that scroll out of the
 //    on-screen history.
@@ -25,6 +29,8 @@
 // Close any Serial Monitor/Plotter before connecting: only one program can use a port.
 
 import processing.serial.*;
+import java.awt.Toolkit;                     // for the system clipboard
+import java.awt.datatransfer.StringSelection;
 
 // ---------------- Settings you might want to change ----------------
 int timeOut = 5;                 // seconds of silence before a "no data" notice is shown
@@ -65,6 +71,14 @@ int lastRx = 0;
 boolean draggingThumb = false;
 int dragOffset = 0;
 
+// ---------------- Text selection ----------------
+// A = where the selection started, B = where it currently ends (line index, character column).
+int selAL = -1, selAC = 0, selBL = -1, selBC = 0;
+boolean selecting = false;       // true while the mouse button is held down in the log
+float charW = 8;                 // width of one monospace character (measured in setup)
+String flashMsg = "";            // short message shown in the status bar (e.g. "Copied")
+int flashUntil = 0;
+
 // ---------------- Plot data ----------------
 int maxCh = 8;
 int plotCap = 5000;              // must be >= the largest value in plotWindows
@@ -74,12 +88,13 @@ int nCh = 0;                     // number of channels seen so far
 String[] chName = new String[maxCh];
 int[] chColor = {0xFF1F77B4, 0xFFFF7F0E, 0xFF2CA02C, 0xFFD62728,
                  0xFF9467BD, 0xFF8C564B, 0xFFE377C2, 0xFF7F7F7F};
+boolean[] chHidden = new boolean[maxCh];   // channels hidden via the legend (kept across reconnects)
 
 PFont fontUI, fontMono;
 
 Dropdown portDD, baudDD, plotDD;
 Dropdown[] dds;
-Button rescanBtn, connectBtn, clearBtn;
+Button rescanBtn, connectBtn, clearBtn, copyBtn;
 Checkbox timeStampCB, autoScrollCB, plotCB;
 
 class LogLine {
@@ -97,6 +112,9 @@ void setup() {
   surface.setTitle("Claude Logger");
   fontUI = createFont("SansSerif", 14, true);
   fontMono = createFont("Monospaced", 14, true);
+  textFont(fontMono, 14);
+  charW = textWidth("M");        // monospace, so every character is this wide
+  textFont(fontUI, 14);
 
   portDD = new Dropdown(50, 10, 240, 28);
   baudDD = new Dropdown(430, 10, 120, 28);
@@ -116,6 +134,7 @@ void setup() {
   rescanBtn = new Button(298, 10, 70, 28, "Rescan");
   connectBtn = new Button(565, 10, 110, 28, "Connect");
   clearBtn = new Button(690, 10, 70, 28, "Clear");
+  copyBtn = new Button(770, 10, 70, 28, "Copy");
 
   timeStampCB = new Checkbox(10, 48, "Timestamp");
   timeStampCB.checked = timeStampDefault;
@@ -132,6 +151,11 @@ void setup() {
 
 void draw() {
   readSerial();
+  if (selecting) {                       // dragging a selection: scroll if the mouse leaves the log
+    if (mouseY < logTop) scrollTo(firstLine - 1);
+    else if (mouseY > logTop + logH) scrollTo(firstLine + 1);
+    updateSelection();
+  }
   if (autoScrollCB.checked) firstLine = maxFirst();
 
   background(255);
@@ -141,6 +165,7 @@ void draw() {
   drawScrollbar();
   drawToolbar();
   drawStatus();
+  cursor(legendHit() >= 0 ? HAND : ARROW);   // hand cursor over clickable legend entries
   for (Dropdown d : dds) d.drawList();   // open lists are drawn last so they sit on top
 }
 
@@ -199,6 +224,11 @@ void trimLog() {
     int k = log.size() - maxLines;
     log.subList(0, k).clear();
     if (!autoScrollCB.checked) firstLine = max(0, firstLine - k);
+    if (selAL >= 0) {                    // selection indexes shift with the removed lines
+      selAL -= k;
+      selBL -= k;
+      if (selAL < 0 || selBL < 0) clearSel();
+    }
   }
 }
 
@@ -414,6 +444,7 @@ void drawPlot() {
   // Auto-scale to the data in view
   float lo = Float.MAX_VALUE, hi = -Float.MAX_VALUE;
   for (int c = 0; c < nCh; c++) {
+    if (chHidden[c]) continue;           // hidden channels don't affect the Y scale
     for (int k = 0; k < n; k++) {
       float v = sample(c, start + k);
       if (!Float.isNaN(v)) {
@@ -423,6 +454,12 @@ void drawPlot() {
     }
   }
   if (lo > hi) {                         // everything in view is a gap
+    noStroke();
+    fill(140);
+    textAlign(CENTER, CENTER);
+    text(allChannelsHidden() ? "All channels hidden. Click a legend entry to show it."
+                             : "No data in view.", px + pw / 2, py + ph / 2);
+    drawLegend();
     textFont(fontUI, 14);
     return;
   }
@@ -453,6 +490,7 @@ void drawPlot() {
   strokeWeight(1.5);
   int stride = max(1, n / (2 * pw));
   for (int c = 0; c < nCh; c++) {
+    if (chHidden[c]) continue;
     stroke(chColor[c]);
     boolean drawing = false;
     int k = 0;
@@ -472,21 +510,7 @@ void drawPlot() {
   strokeWeight(1);
   noClip();
 
-  // Legend with the latest value of each channel
-  int lx = px + pw + 14;
-  for (int c = 0; c < nCh; c++) {
-    int ly = py + 10 + c * 26;
-    stroke(chColor[c]);
-    strokeWeight(3);
-    line(lx, ly, lx + 14, ly);
-    strokeWeight(1);
-    float latest = sample(c, plotTotal - 1);
-    String lbl = chName[c] + ": " + (Float.isNaN(latest) ? "-" : fmt(latest));
-    noStroke();
-    fill(30);
-    textAlign(LEFT, CENTER);
-    text(fit(lbl, winW - lx - 22 - 6), lx + 20, ly);
-  }
+  drawLegend();                          // latest value of each channel; click to hide/show
 
   // Footer
   noStroke();
@@ -498,6 +522,69 @@ void drawPlot() {
   textFont(fontUI, 14);
 }
 
+// ---------------- Plot legend (click an entry to hide/show that channel) ----------------
+int legendX() {
+  return winW - 116;                     // right-hand margin of the plot panel
+}
+
+int legendY(int c) {
+  return toolbarH + 24 + c * 26;
+}
+
+// Returns the channel under the mouse in the legend, or -1.
+int legendHit() {
+  if (!plotCB.checked) return -1;
+  for (int c = 0; c < nCh; c++) {
+    if (mouseX >= legendX() - 4 && mouseX <= winW - 2 && abs(mouseY - legendY(c)) <= 12) return c;
+  }
+  return -1;
+}
+
+boolean allChannelsHidden() {
+  for (int c = 0; c < nCh; c++) {
+    if (!chHidden[c]) return false;
+  }
+  return true;
+}
+
+void drawLegend() {
+  int lx = legendX();
+  int hov = legendHit();
+  for (int c = 0; c < nCh; c++) {
+    int ly = legendY(c);
+    if (c == hov) {                      // hover highlight
+      noStroke();
+      fill(228, 236, 248);
+      rect(lx - 4, ly - 12, winW - lx - 2, 24, 4);
+    }
+    float latest = plotTotal > 0 ? sample(c, plotTotal - 1) : Float.NaN;
+    String lbl = chName[c] + ": " + (Float.isNaN(latest) ? "-" : fmt(latest));
+    if (chHidden[c]) {
+      stroke(190);                       // hollow swatch and greyed text = hidden
+      noFill();
+      strokeWeight(1);
+      rect(lx, ly - 4, 14, 8, 2);
+      noStroke();
+      fill(160);
+    } else {
+      stroke(chColor[c]);
+      strokeWeight(3);
+      line(lx, ly, lx + 14, ly);
+      strokeWeight(1);
+      noStroke();
+      fill(30);
+    }
+    textAlign(LEFT, CENTER);
+    String t = fit(lbl, winW - lx - 26);
+    text(t, lx + 20, ly);
+    if (chHidden[c]) {                   // strike-through
+      stroke(160);
+      line(lx + 20, ly, lx + 20 + textWidth(t), ly);
+      noStroke();
+    }
+  }
+}
+
 void drawLog() {
   clip(0, logTop, logW, logH);
   textFont(fontMono, 14);
@@ -505,10 +592,23 @@ void drawLog() {
   noStroke();
   int n = log.size();
   int last = min(n, firstLine + visibleLines() + 1);
+  boolean sel = hasSelection();
+  int[] r = sel ? selRange() : null;
   for (int i = firstLine; i < last; i++) {
     LogLine ln = log.get(i);
+    int y = logTop + 4 + (i - firstLine) * lineH;
+    if (sel && i >= r[0] && i <= r[2]) {          // highlight the selected part of this line
+      int len = ln.text.length();
+      int a = (i == r[0]) ? min(r[1], len) : 0;
+      int b = (i == r[2]) ? min(r[3], len) : len;
+      float wd = (b - a) * charW + (i < r[2] ? charW * 0.5 : 0);
+      if (wd > 0) {
+        fill(176, 208, 255);
+        rect(pad + a * charW, y, wd, lineH);
+      }
+    }
     if (ln.sys) fill(170, 90, 0); else fill(30);
-    text(ln.text, pad, logTop + 4 + (i - firstLine) * lineH + lineH / 2);
+    text(ln.text, pad, y + lineH / 2);
   }
   noClip();
   textFont(fontUI, 14);
@@ -546,6 +646,7 @@ void drawToolbar() {
   baudDD.drawBox();
   connectBtn.show();
   clearBtn.show();
+  copyBtn.show();
   timeStampCB.show();
   autoScrollCB.show();
   plotCB.show();
@@ -567,6 +668,13 @@ void drawStatus() {
   String l2 = filename.length() == 0 ? "Log file: (created when you connect)"
             : (connected ? "Logging to: " : "Last log file: ") + sketchPath(filename + ".csv");
   text(l1, pad, y0 + 13);
+  if (millis() < flashUntil) {           // short-lived feedback such as "Copied selection"
+    fill(0, 110, 0);
+    textAlign(RIGHT, CENTER);
+    text(flashMsg, winW - pad, y0 + 13);
+    fill(30);
+    textAlign(LEFT, CENTER);
+  }
   text(fit(l2, winW - 2 * pad), pad, y0 + 31);
 }
 
@@ -602,8 +710,10 @@ void mousePressed() {
     if (connected) disconnect(); else connect();
     return;
   }
+  if (copyBtn.over()) { doCopy(); return; }
   if (clearBtn.over()) {
     log.clear();
+    clearSel();
     firstLine = 0;
     resetPlot(false);                    // keep channel names
     return;
@@ -621,17 +731,32 @@ void mousePressed() {
     return;
   }
 
+  // Plot legend: click an entry to hide or show that channel
+  int hit = legendHit();
+  if (hit >= 0) {
+    chHidden[hit] = !chHidden[hit];
+    return;
+  }
+
   // Scrollbar
-  if (mouseX >= winW - sbW && mouseY >= logTop && mouseY < logTop + logH && log.size() > visibleLines()) {
-    int ty = thumbY();
-    if (mouseY >= ty && mouseY <= ty + thumbH()) {
-      draggingThumb = true;
-      dragOffset = mouseY - ty;
-    } else if (mouseY < ty) {
-      scrollTo(firstLine - visibleLines());
-    } else {
-      scrollTo(firstLine + visibleLines());
+  if (mouseX >= winW - sbW && mouseY >= logTop && mouseY < logTop + logH) {
+    if (log.size() > visibleLines()) {
+      int ty = thumbY();
+      if (mouseY >= ty && mouseY <= ty + thumbH()) {
+        draggingThumb = true;
+        dragOffset = mouseY - ty;
+      } else if (mouseY < ty) {
+        scrollTo(firstLine - visibleLines());
+      } else {
+        scrollTo(firstLine + visibleLines());
+      }
     }
+    return;
+  }
+
+  // Click inside the log text area: start a selection
+  if (mouseX < logW && mouseY >= logTop && mouseY < logTop + logH) {
+    startSelection();
   }
 }
 
@@ -647,6 +772,117 @@ void mouseDragged() {
 
 void mouseReleased() {
   draggingThumb = false;
+  selecting = false;
+}
+
+// =====================================================================
+// Text selection and copying
+// =====================================================================
+// Converts a mouse position to {line index, character column}, clamped to the log.
+int[] posAt(int mx, int my) {
+  int n = log.size();
+  if (n == 0) return new int[] { -1, 0 };
+  int ln = constrain(firstLine + floor((my - logTop - 4) / (float) lineH), 0, n - 1);
+  int col = constrain(round((mx - pad) / charW), 0, log.get(ln).text.length());
+  return new int[] { ln, col };
+}
+
+void startSelection() {
+  int[] p = posAt(mouseX, mouseY);
+  if (p[0] < 0) return;
+  if (mouseEvent != null && mouseEvent.getCount() == 2) {      // double-click: select the whole line
+    selAL = p[0]; selAC = 0;
+    selBL = p[0]; selBC = log.get(p[0]).text.length();
+    return;
+  }
+  if (keyPressed && key == CODED && keyCode == SHIFT && selAL >= 0) {   // shift-click extends
+    selBL = p[0];
+    selBC = p[1];
+  } else {
+    selAL = p[0]; selAC = p[1];
+    selBL = p[0]; selBC = p[1];
+  }
+  selecting = true;
+}
+
+void updateSelection() {
+  int[] p = posAt(mouseX, mouseY);
+  if (p[0] >= 0) {
+    selBL = p[0];
+    selBC = p[1];
+  }
+}
+
+boolean hasSelection() {
+  return selAL >= 0 && selBL >= 0 && selAL < log.size() && selBL < log.size()
+      && (selAL != selBL || selAC != selBC);
+}
+
+// Returns {startLine, startCol, endLine, endCol} with start before end.
+int[] selRange() {
+  boolean aFirst = selAL < selBL || (selAL == selBL && selAC <= selBC);
+  return aFirst ? new int[] { selAL, selAC, selBL, selBC }
+                : new int[] { selBL, selBC, selAL, selAC };
+}
+
+String selectedText() {
+  int[] r = selRange();
+  StringBuilder sb = new StringBuilder();
+  for (int i = r[0]; i <= r[2] && i < log.size(); i++) {
+    String t = log.get(i).text;
+    int a = (i == r[0]) ? min(r[1], t.length()) : 0;
+    int b = (i == r[2]) ? min(r[3], t.length()) : t.length();
+    sb.append(t.substring(a, b));
+    if (i < r[2]) sb.append('\n');
+  }
+  return sb.toString();
+}
+
+void selectAll() {
+  int n = log.size();
+  if (n == 0) return;
+  selAL = 0;
+  selAC = 0;
+  selBL = n - 1;
+  selBC = log.get(n - 1).text.length();
+}
+
+void clearSel() {
+  selAL = -1;
+  selBL = -1;
+  selecting = false;
+}
+
+void flash(String s) {
+  flashMsg = s;
+  flashUntil = millis() + 2500;
+}
+
+void copyToClipboard(String s) {
+  try {
+    Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(s), null);
+  } catch (Exception e) {
+    flash("Could not access the clipboard.");
+  }
+}
+
+// Copy button: the selection if there is one, otherwise every data line (notices excluded).
+void doCopy() {
+  if (hasSelection()) {
+    copyToClipboard(selectedText());
+    flash("Copied selection");
+  } else {
+    StringBuilder sb = new StringBuilder();
+    int count = 0;
+    for (LogLine l : log) {
+      if (!l.sys) {
+        sb.append(l.text).append('\n');
+        count++;
+      }
+    }
+    copyToClipboard(sb.toString());
+    flash("Copied " + count + " data lines");
+  }
 }
 
 void mouseWheel(processing.event.MouseEvent e) {
@@ -654,6 +890,19 @@ void mouseWheel(processing.event.MouseEvent e) {
 }
 
 void keyPressed() {
+  if (keyEvent != null && (keyEvent.isControlDown() || keyEvent.isMetaDown())) {
+    if (keyCode == 67) {                                            // Ctrl/Cmd+C
+      if (hasSelection()) {
+        copyToClipboard(selectedText());
+        flash("Copied selection");
+      } else {
+        flash("Nothing selected. The Copy button copies all data lines.");
+      }
+    } else if (keyCode == 65) {                                     // Ctrl/Cmd+A
+      selectAll();
+    }
+    return;
+  }
   if (key == CODED) {
     if (keyCode == UP) scrollTo(firstLine - 1);
     else if (keyCode == DOWN) scrollTo(firstLine + 1);
