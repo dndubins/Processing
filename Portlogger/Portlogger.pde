@@ -110,7 +110,7 @@ void exit() {                //make sure the file closes
   if(output!=null){
     output.flush();
     output.close();
-    println("Saved log file: "+filename+".csv. You may now close Processing.");
+    println("Saved log file: "+sketchPath(filename+".csv")+". You may now close Processing.");
   }
   super.exit();
 }
