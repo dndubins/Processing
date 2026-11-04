@@ -51,8 +51,8 @@ int defaultLineEnding = 1;       // 0 = none, 1 = Newline, 2 = Carriage return, 
 int plotH = 280;                 // plot panel height in pixels
 
 // ---------------- Layout ----------------
-int winW = 900;
-int winH = 760;
+int winW = 900;  // width of window (adjust for your screen)
+int winH = 700;  // height of window (adjust for your screen)
 int toolbarH = 76;
 int statusH = 44;
 int sendH = 36;                  // height of the send bar that sits above the status bar
