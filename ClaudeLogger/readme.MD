@@ -99,4 +99,5 @@ Written by Claude.AI (Sonnet 5.5), prompted by and tested with a real Arduino. B
 
 ## License
 
-<!-- TODO: choose a license and state it here. Check the licensing of the original sketch this is based on. -->
+MIT License. Copyright (c) 2026 David Dubins. See the [LICENSE](LICENSE) file for details.
+
