@@ -79,8 +79,13 @@ void loop() {
 }
 ```
 
+## Try the send box
+
+`examples/MenuDemo/MenuDemo.ino` is a small Arduino sketch with a text menu: read A0, read A1, or change the reading frequency. Upload it, connect at 9600 baud, set the line-ending dropdown to **Newline**, and send `1`, `2` or `3`. Readings stream in as `A0:512` so they appear on the plot, and anything you send is logged in the transcript.
+
 ## Good to know
 
+- Drag the grip in the bottom-right corner to make the window taller or shorter and see more or fewer lines of the log. The width is fixed, and there is a minimum height.
 - The window keeps the most recent 50,000 lines. The CSV file keeps everything.
 - If no data arrives for 5 seconds, a notice appears in the log (notices are shown in orange and are never written to the file).
 - Non-printable characters, including tabs, are dropped from incoming lines.
