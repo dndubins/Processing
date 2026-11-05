@@ -3,6 +3,7 @@
 // Written by Claude.AI Sonnet 5.5 Medium
 // Based on the original by David Dubins
 // Created: 04-Nov-26
+// Last Updated: 05-Nov-26
 //
 // Features:
 //  - Port and baud rate dropdown menus (baud can be changed while connected)
@@ -18,6 +19,7 @@
 //    file holds the whole transcript. Up/Down recall earlier messages.
 //  - Live plot of numeric columns (up to 8 channels, auto-scaling, adjustable window);
 //    click a legend entry to hide or show that channel (hidden channels are still logged)
+//  - Drag the grip in the bottom-right corner to change the window height (width stays fixed)
 //  - Each Connect creates a new timestamped .csv in this sketch's folder
 //  - Everything received is written to the file, even lines that scroll out of the
 //    on-screen history.
@@ -37,7 +39,7 @@ import java.awt.Toolkit;                     // for the system clipboard
 import java.awt.datatransfer.*;              // StringSelection, DataFlavor, Transferable
 
 // ---------------- Settings you might want to change ----------------
-int timeOut = 61;                // seconds of silence before a "no data" notice is shown
+int timeOut = 61;                 // seconds of silence before a "no data" notice is shown
 boolean timeStampDefault = false;
 boolean plotDefault = true;      // show the live plot at start-up
 int[] baudRates = {300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 74880,
@@ -52,7 +54,7 @@ int plotH = 280;                 // plot panel height in pixels
 
 // ---------------- Layout ----------------
 int winW = 900;  // width of window (adjust for your screen)
-int winH = 700;  // height of window (adjust for your screen)
+int winH = 700;  // starting height of window (drag the bottom-right grip to change it)
 int toolbarH = 76;
 int statusH = 44;
 int sendH = 36;                  // height of the send bar that sits above the status bar
@@ -64,6 +66,7 @@ int sbW = 14;                    // scrollbar width
 int logTop = toolbarH;           // these two change when the plot is shown/hidden
 int logH = winH - toolbarH - statusH - sendH;
 int logW = winW - sbW;
+int minWinH = min(winH, toolbarH + plotH + statusH + sendH + 5 * lineH);   // smallest allowed height
 
 // ---------------- State ----------------
 Serial mySerial;
@@ -79,6 +82,8 @@ int lastRx = 0;
 
 boolean draggingThumb = false;
 int dragOffset = 0;
+boolean resizing = false;        // true while the corner grip is being dragged
+int grabDY = 0;                  // distance from the mouse to the window's bottom edge at grab time
 
 // ---------------- Text selection ----------------
 // A = where the selection started, B = where it currently ends (line index, character column).
@@ -127,6 +132,7 @@ void settings() {
 
 void setup() {
   surface.setTitle("Claude Logger");
+  surface.setResizable(false);           // native resizing is off; the corner grip changes the height
   fontUI = createFont("SansSerif", 14, true);
   fontMono = createFont("Monospaced Bold", 14, true);
   textFont(fontMono, 14);
@@ -172,6 +178,13 @@ void setup() {
 }
 
 void draw() {
+  if (resizing) {                        // dragging the corner grip: change the height only
+    int h = constrain(mouseY + grabDY, minWinH, displayHeight);
+    if (h != winH) {
+      surface.setSize(winW, h);
+      applyHeight(h);
+    }
+  }
   readSerial();
   if (selecting) {                       // dragging a selection: scroll if the mouse leaves the log
     if (mouseY < logTop) scrollTo(firstLine - 1);
@@ -188,7 +201,8 @@ void draw() {
   drawToolbar();
   drawStatus();
   drawSendBar();
-  cursor(legendHit() >= 0 ? HAND : (sendFieldOver() ? TEXT : ARROW));   // hand cursor over clickable legend entries
+  drawGrip();
+  cursor((overGrip() || resizing) ? MOVE : (legendHit() >= 0 ? HAND : (sendFieldOver() ? TEXT : ARROW)));   // hand cursor over clickable legend entries
   for (Dropdown d : dds) d.drawList();   // open lists are drawn last so they sit on top
 }
 
@@ -394,6 +408,30 @@ void parsePlot(String line) {
 // =====================================================================
 // Layout / scrolling helpers
 // =====================================================================
+// Height-only resizing. Processing can't lock one dimension of a native window, so the
+// window itself is not resizable; you drag the grip in the bottom-right corner instead.
+boolean overGrip() {
+  return mouseX >= winW - 24 && mouseX < winW && mouseY >= winH - 24 && mouseY < winH;
+}
+
+void drawGrip() {
+  stroke(140);
+  for (int i = 0; i < 3; i++) {
+    int o = 5 + i * 5;
+    line(winW - o, winH - 3, winW - 3, winH - o);
+  }
+  noStroke();
+}
+
+// Re-position everything that is anchored to the bottom of the window.
+void applyHeight(int h) {
+  winH = h;
+  sendY = winH - statusH - sendH;
+  lineEndDD.y = sendY + 5;
+  sendBtn.y = sendY + 5;
+  updateLayout();
+}
+
 void updateLayout() {
   logTop = toolbarH + (plotCB.checked ? plotH : 0);
   logH = winH - logTop - statusH - sendH;
@@ -698,7 +736,7 @@ void drawStatus() {
     fill(30);
     textAlign(LEFT, CENTER);
   }
-  text(fit(l2, winW - 2 * pad), pad, y0 + 31);
+  text(fit(l2, winW - pad - 30), pad, y0 + 31);
 }
 
 String fit(String s, float maxW) {
@@ -722,6 +760,14 @@ void mousePressed() {
       d.listOpen = false;
       return;
     }
+  }
+
+  // Corner grip: start changing the window height
+  if (overGrip()) {
+    resizing = true;
+    grabDY = winH - mouseY;
+    sendFocus = false;
+    return;
   }
 
   // Send bar: clicking anywhere outside it drops keyboard focus from the text box
@@ -802,6 +848,7 @@ void mouseDragged() {
 
 void mouseReleased() {
   draggingThumb = false;
+  resizing = false;
   selecting = false;
 }
 
