@@ -24,6 +24,7 @@
 //  - Each Connect creates a new timestamped .csv in this sketch's folder
 //  - Everything received is written to the file, even lines that scroll out of the
 //    on-screen history.
+//  - Hover over a plot point (mouse still for a moment) to see its x and y
 //
 // Plot input formats (one sample per line):
 //    12.5,30,7.1            comma/semicolon separated columns
