@@ -59,6 +59,8 @@ int defaultPlotWindowIndex = 3;  // 3 = 1000 samples
 boolean logSentToFile = true;    // also write text you send (with a "> " prefix) to the CSV
 int defaultLineEnding = 1;       // 0 = none, 1 = Newline, 2 = Carriage return, 3 = both
 int plotH = 280;                 // plot panel height in pixels
+int hoverDelay = 250;            // how long (in milliseconds) the mouse must sit still before the tooltip appears
+float hoverRadius = 14;          // how close (in pixels) the mouse must be to a data point to count as "on" it
 
 // ---------------- Layout ----------------
 // These numbers control where things appear on the screen, in pixels.
@@ -124,6 +126,9 @@ String[] chName = new String[maxCh];  // names shown in the plot legend
 int[] chColor = {0xFF1F77B4, 0xFFFF7F0E, 0xFF2CA02C, 0xFFD62728,
                  0xFF9467BD, 0xFF8C564B, 0xFFE377C2, 0xFF7F7F7F};
 boolean[] chHidden = new boolean[maxCh];   // channels hidden via the legend (kept across reconnects)
+// Used to notice when the mouse has stopped moving (for the hover tooltip on the plot).
+int lastMX = -1, lastMY = -1;    // where the mouse was on the previous frame
+int lastMoveMs = 0;              // the time (in milliseconds) when the mouse last moved
 
 PFont fontUI, fontMono;          // two fonts: one for buttons, one for log text
 
@@ -215,6 +220,13 @@ void draw() {
       surface.setSize(winW, h);          // change the actual window height
       applyHeight(h);                    // move bottom-anchored parts to match
     }
+  }
+
+  // Notice whether the mouse has moved since the last frame.
+  if (mouseX != lastMX || mouseY != lastMY) {
+    lastMX = mouseX;                     // remember where the mouse is now
+    lastMY = mouseY;
+    lastMoveMs = millis();               // and when it moved
   }
 
   readSerial();                          // check for new data from the device
@@ -697,6 +709,7 @@ void drawPlot() {
   noClip();                                    // stop limiting drawing to the graph box
 
   drawLegend();                          // latest value of each channel; click to hide/show
+  drawHoverTip(px, py, pw, ph, lo, hi, start, n, win);   // tooltip for the point under the mouse
 
   // Footer
   noStroke();
@@ -706,6 +719,88 @@ void drawPlot() {
   textAlign(RIGHT, TOP);
   text("Samples received: " + plotTotal, px + pw, py + ph + 6);
   textFont(fontUI, 14);
+}
+
+// Show the (x, y) of the data point under the mouse, once the mouse has stopped moving.
+// x = the sample number (1 = the first sample after you pressed Connect), y = the value.
+void drawHoverTip(int px, int py, int pw, int ph, float lo, float hi, long start, int n, int win) {
+  if (millis() - lastMoveMs < hoverDelay) return;   // mouse still moving? wait until it stops
+
+  // Only when the mouse is over the graph box.
+  if (mouseX < px || mouseX > px + pw || mouseY < py || mouseY > py + ph) return;
+
+  for (Dropdown d : dds) {
+    if (d.listOpen) return;                         // an open menu is in the way, so stay quiet
+  }
+  if (resizing || draggingThumb || selecting) return;   // busy dragging something else
+
+  float dx = pw / (float) max(1, win - 1);          // pixels between neighbouring samples
+  int kMid = round((mouseX - px) / dx);             // the sample (in view) nearest the mouse sideways
+  int span = min(n, ceil(hoverRadius / dx));        // how many samples either side could be close enough
+
+  float best = hoverRadius;                         // closest distance found so far, in pixels
+  int bestC = -1, bestK = -1;                       // which channel and sample won (-1 = nothing yet)
+  float bestX = 0, bestY = 0, bestV = 0;            // where that point is on screen, and its value
+
+  // Check the samples near the mouse, in every visible channel.
+  for (int k = max(0, kMid - span); k <= min(n - 1, kMid + span); k++) {
+    float x = px + dx * k;                          // screen x of this sample
+    for (int c = 0; c < nCh; c++) {
+      if (chHidden[c]) continue;                    // hidden channels can't be hovered
+      float v = sample(c, start + k);               // the stored value
+      if (Float.isNaN(v)) continue;                 // skip gaps
+      float y = py + ph - (v - lo) / (hi - lo) * ph;    // screen y of this value
+      float gap = dist(mouseX, mouseY, x, y);       // how far is the mouse from this point?
+      if (gap < best) {                             // closer than anything so far?
+        best = gap;
+        bestC = c;
+        bestK = k;
+        bestX = x;
+        bestY = y;
+        bestV = v;
+      }
+    }
+  }
+  if (bestC < 0) return;                            // nothing close enough, so no tooltip
+
+  // Draw a ring around the point, so you can see which one it is.
+  noFill();
+  stroke(chColor[bestC]);
+  strokeWeight(2);
+  ellipse(bestX, bestY, 11, 11);
+  strokeWeight(1);
+
+  // The words for the tooltip.
+  String l1 = chName[bestC];                                  // the channel name
+  String l2 = "x: " + (start + bestK + 1) + "   y: " + fmt(bestV);   // sample number and value
+  float tw = max(textWidth(l1) + 32, textWidth(l2) + 16);     // box width, based on the longer line
+  float th = 38;                                              // box height (two lines of text)
+
+  // Put the box up and to the right of the point, but keep it inside the graph.
+  float bx = bestX + 12;
+  float by = bestY - th - 8;
+  if (bx + tw > px + pw) bx = bestX - 12 - tw;      // no room on the right? flip to the left
+  bx = max(px, bx);
+  if (by < py) by = bestY + 12;                     // no room above? go below
+  by = min(by, py + ph - th);
+
+  // The box itself.
+  fill(255, 255, 255, 240);
+  stroke(120);
+  rect(bx, by, tw, th, 4);
+
+  // A little colour swatch next to the name.
+  stroke(chColor[bestC]);
+  strokeWeight(3);
+  line(bx + 8, by + 11, bx + 20, by + 11);
+  strokeWeight(1);
+
+  // And the text.
+  noStroke();
+  fill(30);
+  textAlign(LEFT, CENTER);
+  text(l1, bx + 26, by + 11);
+  text(l2, bx + 8, by + 27);
 }
 
 // ---------------- Plot legend (click an entry to hide/show that channel) ----------------
