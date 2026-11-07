@@ -43,8 +43,8 @@ import java.awt.datatransfer.*;              // StringSelection, DataFlavor, Tra
 
 // ---------------- Settings you might want to change ----------------
 int timeOut = 61;                 // seconds of silence before a "no data" notice is shown
-boolean timeStampDefault = false; // Should timestamps be turned on when the program starts?
-boolean plotDefault = true;      // show the live plot at start-up
+boolean timeStampDefault = true;  // Should timestamps be turned on when the program starts?
+boolean plotDefault = true;       // show the live plot at start-up
 
 // Common speeds for serial communication. Both sides must use the same speed.
 int[] baudRates = {300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 74880,
