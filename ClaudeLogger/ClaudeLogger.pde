@@ -163,7 +163,7 @@ void setup() {
 
   // Load the fonts we will use.
   fontUI = createFont("SansSerif", 14, true);
-  fontMono = createFont("Monospaced Bold", 14, true);
+  fontMono = createFont("Monospaced.bold", 14, true);
   textFont(fontMono, 14);
   charW = textWidth("M");        // monospace, so every character is this wide
   textFont(fontUI, 14);
