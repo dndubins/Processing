@@ -4,7 +4,7 @@
 // Additional beginner-friendly comments assisted by Perplexity AI
 // Based on the original by David Dubins
 // Created: 04-Nov-26
-// Last Updated: 05-Nov-26
+// Last Updated: 11-Nov-26
 //
 // Features:
 //  - Port and baud rate dropdown menus (baud can be changed while connected)
@@ -346,11 +346,15 @@ void rescanPorts() {
   String prev = portDD.selected();             // remember the currently selected port
   String[] ports = Serial.list();              // get a list of available ports
   portDD.setItems(ports);                      // show them in the dropdown
-
   // If the old port is still there, keep it selected.
+  boolean prevPort = false;
   for (int i = 0; i < ports.length; i++) {
-    if (ports[i].equals(prev)) portDD.sel = i;
+    if (ports[i].equals(prev)){
+      portDD.sel = i;
+      prevPort = true;
+    }
   }
+  if (!prevPort && ports.length > 0) portDD.sel = ports.length - 1;  // default to the last port
   sysMsg("Found " + ports.length + " serial port(s).");
 }
 
