@@ -1,10 +1,10 @@
 // ClaudeLogger.pde
-// Serial logger (CSV format) with a scrolling monitor window, for Arduino.
+// Serial logger (CSV format) with a scrolling monitor window and plotter, for Arduino.
 // Written by Claude.AI Sonnet 5.5 Medium
 // Additional beginner-friendly comments assisted by Perplexity AI
 // Based on the original by David Dubins
 // Created: 04-Nov-26
-// Last Updated: 11-Nov-26
+// Last Updated: 12-Nov-26
 //
 // Features:
 //  - Port and baud rate dropdown menus (baud can be changed while connected)
@@ -20,6 +20,9 @@
 //    file holds the whole transcript. Up/Down recall earlier messages.
 //  - Live plot of numeric columns (up to 8 channels, auto-scaling, adjustable window);
 //    click a legend entry to hide or show that channel (hidden channels are still logged)
+//  - A tick box beside each legend entry swaps that channel's trace for its first
+//    derivative, dSignal/dt, in units per second. Derivative traces use their own
+//    y-axis on the right. The tick boxes only work while Timestamp is ticked.
 //  - Drag the grip in the bottom-right corner to change the window height (width stays fixed)
 //  - Each Connect creates a new timestamped .csv in this sketch's folder
 //  - Everything received is written to the file, even lines that scroll out of the
@@ -62,6 +65,13 @@ int defaultLineEnding = 1;       // 0 = none, 1 = Newline, 2 = Carriage return, 
 int plotH = 280;                 // plot panel height in pixels
 int hoverDelay = 250;            // how long (in milliseconds) the mouse must sit still before the tooltip appears
 float hoverRadius = 14;          // how close (in pixels) the mouse must be to a data point to count as "on" it
+
+// Derivative settings. Samples that arrive in the same burst get (almost) the same
+// arrival time, so the derivative is measured against the most recent earlier sample
+// that is at least derivMinMs older. Raise derivMinMs for a smoother (but slower
+// reacting) derivative of noisy or very fast data.
+int derivMinMs = 20;             // smallest time gap (milliseconds) used for a derivative
+int derivMaxBack = 500;          // how many samples back we are willing to look for that gap
 
 // ---------------- Layout ----------------
 // These numbers control where things appear on the screen, in pixels.
@@ -119,6 +129,7 @@ int plotCap = 5000;              // must be >= the largest value in plotWindows
 
 // A 2D array: one row per channel, storing that channel's past values.
 float[][] plotBuf = new float[maxCh][plotCap];
+int[] plotMs = new int[plotCap];       // arrival time (millis) of every stored sample, for derivatives
 long plotTotal = 0;              // total samples received (ring buffer position)
 int nCh = 0;                     // number of channels seen so far
 String[] chName = new String[maxCh];  // names shown in the plot legend
@@ -127,6 +138,12 @@ String[] chName = new String[maxCh];  // names shown in the plot legend
 int[] chColor = {0xFF1F77B4, 0xFFFF7F0E, 0xFF2CA02C, 0xFFD62728,
                  0xFF9467BD, 0xFF8C564B, 0xFFE377C2, 0xFF7F7F7F};
 boolean[] chHidden = new boolean[maxCh];   // channels hidden via the legend (kept across reconnects)
+boolean[] chDeriv = new boolean[maxCh];    // channels set to show dSignal/dt (kept across reconnects)
+
+// The y-axis ranges used on the current frame. Normal channels share the left axis
+// (sLo..sHi); derivative channels share the right axis (dLo..dHi).
+float sLo = 0, sHi = 1, dLo = -1, dHi = 1;
+
 // Used to notice when the mouse has stopped moving (for the hover tooltip on the plot).
 int lastMX = -1, lastMY = -1;    // where the mouse was on the previous frame
 int lastMoveMs = 0;              // the time (in milliseconds) when the mouse last moved
@@ -451,6 +468,54 @@ float sample(int c, long absIdx) {
   return plotBuf[c][(int) (absIdx % plotCap)];
 }
 
+// Get the arrival time (in milliseconds) of one stored sample.
+int sampleMs(long absIdx) {
+  return plotMs[(int) (absIdx % plotCap)];
+}
+
+// Is channel c currently being shown as a derivative?
+// It needs both its own tick box AND the Timestamp box to be ticked.
+boolean derivOn(int c) {
+  return chDeriv[c] && timeStampCB.checked;
+}
+
+// Is at least one visible channel being shown as a derivative?
+boolean anyDerivShown() {
+  for (int c = 0; c < nCh; c++) {
+    if (derivOn(c) && !chHidden[c]) return true;
+  }
+  return false;
+}
+
+// The first derivative of channel c at sample number i, in units per second.
+// Returns NaN (a gap) if it cannot be worked out.
+float deriv(int c, long i) {
+  if (i < 0 || i >= plotTotal) return Float.NaN;
+  float v = sample(c, i);
+  if (Float.isNaN(v)) return Float.NaN;
+
+  long oldest = Math.max(0L, plotTotal - plotCap);   // the oldest sample still in the buffer
+  int t = sampleMs(i);
+
+  // Walk backwards until we find an earlier sample that is far enough back in time.
+  for (int b = 1; b <= derivMaxBack; b++) {
+    long j = i - b;
+    if (j < oldest) return Float.NaN;          // ran out of stored history
+    int dt = t - sampleMs(j);                  // milliseconds between the two samples
+    if (dt >= derivMinMs) {
+      float pv = sample(c, j);
+      if (Float.isNaN(pv)) return Float.NaN;   // the earlier sample was a gap
+      return (v - pv) * 1000.0f / dt;          // change in value per second
+    }
+  }
+  return Float.NaN;
+}
+
+// The value that is actually plotted for channel c: either the raw value or its derivative.
+float plotVal(int c, long absIdx) {
+  return derivOn(c) ? deriv(c, absIdx) : sample(c, absIdx);
+}
+
 // Turn one incoming text line into numbers for the plot.
 void parsePlot(String line) {
   // Does the line use commas or semicolons to separate values?
@@ -504,6 +569,7 @@ void parsePlot(String line) {
   for (int c = 0; c < maxCh; c++) {
     plotBuf[c][idx] = (c < n) ? vals[c] : Float.NaN;
   }
+  plotMs[idx] = millis();                      // remember when this sample arrived (for derivatives)
 
   // Give each channel a name if it does not already have one.
   for (int c = 0; c < n; c++) {
@@ -596,6 +662,24 @@ String fmt(float v) {
   return String.format("%.2f", v);                  // small numbers: two decimals
 }
 
+// Add a little breathing space around a range of values, so lines don't touch the edges.
+// If there is no data (lo > hi) a default range of -1 to 1 is used.
+float[] padRange(float lo, float hi) {
+  if (lo > hi) return new float[] { -1, 1 };   // nothing to scale to
+  if (hi - lo < 1e-9) return new float[] { lo - 1, hi + 1 };   // all values identical
+  float p = (hi - lo) * 0.05;                  // add 5% space above and below the data
+  return new float[] { lo - p, hi + p };
+}
+
+// Convert a data value into a y position on the screen, using the right axis scale
+// (normal channels use the left axis; derivative channels use the right axis).
+float yPix(int c, float v, int py, int ph) {
+  boolean d = derivOn(c);
+  float lo = d ? dLo : sLo;
+  float hi = d ? dHi : sHi;
+  return py + ph - (v - lo) / (hi - lo) * ph;
+}
+
 // Draw the live graph.
 void drawPlot() {
   if (!plotCB.checked) return;                 // do nothing if the Plot box is unchecked
@@ -608,9 +692,12 @@ void drawPlot() {
   stroke(190);
   line(0, top + plotH, winW, top + plotH);     // line under the plot
 
-  // Position and size of the graph area.
+  // Position and size of the graph area. It gets narrower when the right-hand
+  // (derivative) axis needs room for its labels.
+  boolean anyD = anyDerivShown();
   int px = 64, py = top + 14;
-  int pw = winW - px - 130, ph = plotH - 14 - 28;
+  int pw = winW - px - (anyD ? 220 : 166);
+  int ph = plotH - 14 - 28;
   stroke(150);
   noFill();
   rect(px, py, pw, ph);                        // draw the graph border
@@ -630,22 +717,33 @@ void drawPlot() {
 
   long start = plotTotal - n;                  // first sample number to draw
 
-  // Auto-scale to the data in view
-  float lo = Float.MAX_VALUE, hi = -Float.MAX_VALUE;  // smallest and largest values found
+  // Auto-scale to the data in view. Normal channels and derivative channels each get
+  // their own range, because their sizes are usually very different.
+  float lo = Float.MAX_VALUE, hi = -Float.MAX_VALUE;     // normal channels: smallest and largest
+  float dlo = Float.MAX_VALUE, dhi = -Float.MAX_VALUE;   // derivative channels: smallest and largest
 
   // Look through visible values to find the lowest and highest.
   for (int c = 0; c < nCh; c++) {
     if (chHidden[c]) continue;           // hidden channels don't affect the Y scale
+    boolean d = derivOn(c);
     for (int k = 0; k < n; k++) {
-      float v = sample(c, start + k);
+      float v = plotVal(c, start + k);
       if (!Float.isNaN(v)) {
-        if (v < lo) lo = v;                    // new lowest value
-        if (v > hi) hi = v;                    // new highest value
+        if (d) {
+          if (v < dlo) dlo = v;
+          if (v > dhi) dhi = v;
+        } else {
+          if (v < lo) lo = v;                  // new lowest value
+          if (v > hi) hi = v;                  // new highest value
+        }
       }
     }
   }
 
-  if (lo > hi) {                         // everything in view is a gap
+  boolean anyRaw = lo <= hi;                   // any normal data in view?
+  boolean anyDv = dlo <= dhi;                  // any derivative data in view?
+
+  if (!anyRaw && !anyDv) {               // everything in view is a gap
     noStroke();
     fill(140);
     textAlign(CENTER, CENTER);
@@ -656,25 +754,39 @@ void drawPlot() {
     return;
   }
 
-  if (hi - lo < 1e-9) {                        // all values are almost identical
-    lo -= 1;                                   // add a little space so the line is visible
-    hi += 1;
-  } else {
-    float padY = (hi - lo) * 0.05;             // add 5% space above and below the data
-    lo -= padY;
-    hi += padY;
-  }
+  float[] rr = padRange(lo, hi);               // final left-axis range
+  sLo = rr[0];
+  sHi = rr[1];
+  float[] dr = padRange(dlo, dhi);             // final right-axis range
+  dLo = dr[0];
+  dHi = dr[1];
 
   // Grid lines and y-axis labels
-  textAlign(RIGHT, CENTER);
+  boolean showLeft = anyRaw || !anyDv;         // skip the left labels if only derivatives are shown
   for (int i = 0; i <= 4; i++) {
     float gy = py + ph * i / 4.0;              // y position of this grid line
-    float val = lerp(hi, lo, i / 4.0);         // value that belongs at this height
     stroke(225);
     line(px, gy, px + pw, gy);                 // draw a horizontal grid line
     noStroke();
-    fill(90);
-    text(fmt(val), px - 6, gy);                // label the grid line
+
+    if (showLeft) {
+      fill(90);
+      textAlign(RIGHT, CENTER);
+      text(fmt(lerp(sHi, sLo, i / 4.0)), px - 6, gy);   // value that belongs at this height
+    }
+    if (anyD) {
+      fill(0, 100, 120);                       // teal labels = derivative axis
+      textAlign(LEFT, CENTER);
+      //Select one of the following:
+      //text(fmt(lerp(dHi, dLo, i / 4.0)), px + pw + 6, gy); // autoscale labels
+      text(String.format("%.3f", lerp(dHi, dLo, i / 4.0)), px + pw + 6, gy); // 3 decimals for y-axis
+    }
+  }
+
+  if (anyD) {                            // caption for the right-hand axis
+    fill(0, 100, 120);
+    textAlign(LEFT, TOP);
+    text("per s", px + pw + 6, py + ph + 6);
   }
 
   // Traces (decimated if there are many more samples than pixels)
@@ -692,7 +804,7 @@ void drawPlot() {
     int k = 0;
 
     while (true) {
-      float v = sample(c, start + k);          // get one value
+      float v = plotVal(c, start + k);         // get one value (raw or derivative)
 
       if (Float.isNaN(v)) {
         if (drawing) { endShape(); drawing = false; }  // missing value ends the line
@@ -700,7 +812,7 @@ void drawPlot() {
         if (!drawing) { beginShape(); drawing = true; }  // start a new line segment
 
         // Convert the data value into an x,y position on the screen.
-        vertex(px + pw * k / (float) max(1, win - 1), py + ph - (v - lo) / (hi - lo) * ph);
+        vertex(px + pw * k / (float) max(1, win - 1), yPix(c, v, py, ph));
       }
 
       if (k >= n - 1) break;                   // reached the newest sample
@@ -714,7 +826,7 @@ void drawPlot() {
   noClip();                                    // stop limiting drawing to the graph box
 
   drawLegend();                          // latest value of each channel; click to hide/show
-  drawHoverTip(px, py, pw, ph, lo, hi, start, n, win);   // tooltip for the point under the mouse
+  drawHoverTip(px, py, pw, ph, start, n, win);   // tooltip for the point under the mouse
 
   // Footer
   noStroke();
@@ -728,7 +840,7 @@ void drawPlot() {
 
 // Show the (x, y) of the data point under the mouse, once the mouse has stopped moving.
 // x = the sample number (1 = the first sample after you pressed Connect), y = the value.
-void drawHoverTip(int px, int py, int pw, int ph, float lo, float hi, long start, int n, int win) {
+void drawHoverTip(int px, int py, int pw, int ph, long start, int n, int win) {
   if (millis() - lastMoveMs < hoverDelay) return;   // mouse still moving? wait until it stops
 
   // Only when the mouse is over the graph box.
@@ -752,9 +864,9 @@ void drawHoverTip(int px, int py, int pw, int ph, float lo, float hi, long start
     float x = px + dx * k;                          // screen x of this sample
     for (int c = 0; c < nCh; c++) {
       if (chHidden[c]) continue;                    // hidden channels can't be hovered
-      float v = sample(c, start + k);               // the stored value
+      float v = plotVal(c, start + k);              // the plotted value (raw or derivative)
       if (Float.isNaN(v)) continue;                 // skip gaps
-      float y = py + ph - (v - lo) / (hi - lo) * ph;    // screen y of this value
+      float y = yPix(c, v, py, ph);                 // screen y of this value
       float gap = dist(mouseX, mouseY, x, y);       // how far is the mouse from this point?
       if (gap < best) {                             // closer than anything so far?
         best = gap;
@@ -776,7 +888,7 @@ void drawHoverTip(int px, int py, int pw, int ph, float lo, float hi, long start
   strokeWeight(1);
 
   // The words for the tooltip.
-  String l1 = chName[bestC];                                  // the channel name
+  String l1 = (derivOn(bestC) ? "d/dt " : "") + chName[bestC];   // the channel name
   String l2 = "x: " + (start + bestK + 1) + "   y: " + fmt(bestV);   // sample number and value
   float tw = max(textWidth(l1) + 32, textWidth(l2) + 16);     // box width, based on the longer line
   float th = 38;                                              // box height (two lines of text)
@@ -808,16 +920,30 @@ void drawHoverTip(int px, int py, int pw, int ph, float lo, float hi, long start
   text(l2, bx + 8, by + 27);
 }
 
-// ---------------- Plot legend (click an entry to hide/show that channel) ----------------
+// ---------------- Plot legend ----------------
+// Each entry has: a small tick box (show d/dt), a colour swatch, and a label.
+// Click the tick box to switch that channel to its derivative.
+// Click anywhere else on the entry to hide or show that channel.
 
 // Left edge of the legend, near the right side of the window.
 int legendX() {
-  return winW - 116;                     // right-hand margin of the plot panel
+  return winW - 156;                     // right-hand margin of the plot panel
 }
 
 // Vertical position of one legend entry.
 int legendY(int c) {
   return toolbarH + 24 + c * 26;
+}
+
+// Returns the channel whose derivative tick box is under the mouse, or -1.
+int tickHit() {
+  if (!plotCB.checked) return -1;              // no legend if the plot is hidden
+
+  int lx = legendX();
+  for (int c = 0; c < nCh; c++) {
+    if (mouseX >= lx - 2 && mouseX <= lx + 16 && abs(mouseY - legendY(c)) <= 9) return c;
+  }
+  return -1;
 }
 
 // Returns the channel under the mouse in the legend, or -1.
@@ -842,6 +968,14 @@ boolean allChannelsHidden() {
 void drawLegend() {
   int lx = legendX();
   int hov = legendHit();                       // which entry is the mouse over?
+  boolean tsOn = timeStampCB.checked;          // derivative tick boxes only work with timestamps
+
+  if (nCh > 0) {                         // small heading above the tick boxes
+    noStroke();
+    fill(tsOn ? 90 : 170);
+    textAlign(LEFT, CENTER);
+    text("d/dt", lx - 1, toolbarH + 8);
+  }
 
   for (int c = 0; c < nCh; c++) {
     int ly = legendY(c);
@@ -852,32 +986,46 @@ void drawLegend() {
       rect(lx - 4, ly - 12, winW - lx - 2, 24, 4);
     }
 
-    float latest = plotTotal > 0 ? sample(c, plotTotal - 1) : Float.NaN;  // newest value
-    String lbl = chName[c] + ": " + (Float.isNaN(latest) ? "-" : fmt(latest));
+    // The derivative tick box (greyed out when Timestamp is off)
+    stroke(tsOn ? 120 : 190);
+    strokeWeight(1);
+    fill(tsOn ? 255 : 238);
+    rect(lx, ly - 7, 14, 14, 2);
+
+    if (chDeriv[c]) {
+      stroke(tsOn ? color(30, 120, 200) : color(170));
+      strokeWeight(2);
+      line(lx + 3, ly, lx + 6, ly + 3);        // first half of the check mark
+      line(lx + 6, ly + 3, lx + 11, ly - 4);   // second half of the check mark
+      strokeWeight(1);
+    }
+
+    float latest = plotTotal > 0 ? plotVal(c, plotTotal - 1) : Float.NaN;  // newest value
+    String lbl = (derivOn(c) ? "d/dt " : "") + chName[c] + ": " + (Float.isNaN(latest) ? "-" : fmt(latest));
 
     if (chHidden[c]) {
       stroke(190);                       // hollow swatch and greyed text = hidden
       noFill();
       strokeWeight(1);
-      rect(lx, ly - 4, 14, 8, 2);
+      rect(lx + 20, ly - 4, 14, 8, 2);
       noStroke();
       fill(160);
     } else {
       stroke(chColor[c]);                        // draw a colored line matching the plot
       strokeWeight(3);
-      line(lx, ly, lx + 14, ly);
+      line(lx + 20, ly, lx + 34, ly);
       strokeWeight(1);
       noStroke();
       fill(30);
     }
 
     textAlign(LEFT, CENTER);
-    String t = fit(lbl, winW - lx - 26);         // shorten the text if it is too long
-    text(t, lx + 20, ly);
+    String t = fit(lbl, winW - lx - 46);         // shorten the text if it is too long
+    text(t, lx + 40, ly);
 
     if (chHidden[c]) {                   // strike-through
       stroke(160);
-      line(lx + 20, ly, lx + 20 + textWidth(t), ly);
+      line(lx + 40, ly, lx + 40 + textWidth(t), ly);
       noStroke();
     }
   }
@@ -1075,6 +1223,17 @@ void mousePressed() {
     plotCB.checked = !plotCB.checked;          // turn the plot on or off
     plotDD.enabled = plotCB.checked;
     updateLayout();                            // give the freed space to the log
+    return;
+  }
+
+  // Derivative tick box in the legend (only works while Timestamp is ticked)
+  int tick = tickHit();
+  if (tick >= 0) {
+    if (timeStampCB.checked) {
+      chDeriv[tick] = !chDeriv[tick];          // switch between raw value and d/dt
+    } else {
+      flash("Tick Timestamp to plot derivatives.");
+    }
     return;
   }
 
