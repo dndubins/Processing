@@ -4,7 +4,7 @@
 // Additional beginner-friendly comments assisted by Perplexity AI
 // Based on the original by David Dubins
 // Created: 04-Nov-26
-// Last Updated: 12-Nov-26
+// Last Updated: 20-Nov-26
 //
 // Features:
 //  - Port and baud rate dropdown menus (baud can be changed while connected)
@@ -28,6 +28,9 @@
 //  - Everything received is written to the file, even lines that scroll out of the
 //    on-screen history.
 //  - Hover over a plot point (mouse still for a moment) to see its x and y
+//  - Load a .csv file and plot the contents for inspection.
+//  - Click a plot point to jump to (and highlight) its line in the log
+//  - Screen Shot button: copies a picture of the whole window (including the plot) to the clipboard
 //
 // Plot input formats (one sample per line):
 //    12.5,30,7.1            comma/semicolon separated columns
@@ -43,6 +46,7 @@
 import processing.serial.*;                  // Lets us talk to Arduino over USB (serial port)
 import java.awt.Toolkit;                     // for the system clipboard
 import java.awt.datatransfer.*;              // StringSelection, DataFlavor, Transferable
+import java.awt.image.BufferedImage;         // for building the screenshot picture
 
 // ---------------- Settings you might want to change ----------------
 int timeOut = 61;                 // seconds of silence before a "no data" notice is shown
@@ -57,7 +61,7 @@ int defaultBaudIndex = 4;        // index into baudRates (4 = 9600)
 int maxLines = 50000;            // lines kept on screen (the file keeps everything)
 
 // Choices for how many past samples the plot shows.
-int[] plotWindows = {100, 200, 500, 1000, 2000, 5000};  // selectable plot widths (samples)
+int[] plotWindows = {100, 200, 500, 1000, 2000, 5000, 10000}; // selectable plot widths (samples). Increase for larger file.
 int defaultPlotWindowIndex = 3;  // 3 = 1000 samples
 
 boolean logSentToFile = true;    // also write text you send (with a "> " prefix) to the CSV
@@ -123,9 +127,22 @@ boolean sendFocus = false;       // true when the send box has keyboard focus
 ArrayList<String> sendHistory = new ArrayList<String>();  // remembers messages you sent
 int histPos = 0;                 // position while browsing history with Up/Down
 
+// ---------------- Reviewing a loaded file ----------------
+boolean reviewing = false;       // true while a loaded file is on screen
+String loadedPath = "";          // full path of the loaded file
+String loadedName = "";          // just the file name
+volatile File pendingLoad = null; // set by the file dialog, handled safely inside draw()
+
+// ---------------- Click-to-jump (plot point -> log line) ----------------
+long markSample = -1;            // sample last clicked (-1 = none); drawn as a vertical marker
+boolean plotReady = false;       // true when the plot was drawn this frame and can be clicked
+int gPx, gPy, gPw, gPh, gN, gWin;   // plot geometry from the last drawPlot()
+long gStart;                     // first sample number in view
+
 // ---------------- Plot data ----------------
 int maxCh = 8;                   // maximum number of lines/channels on the plot
-int plotCap = 5000;              // must be >= the largest value in plotWindows
+int plotCap = 10000;            // must be >= the largest value in plotWindows
+boolean shotPending = false;     // set by the Screen Shot button; handled at the end of draw()
 
 // A 2D array: one row per channel, storing that channel's past values.
 float[][] plotBuf = new float[maxCh][plotCap];
@@ -152,7 +169,7 @@ PFont fontUI, fontMono;          // two fonts: one for buttons, one for log text
 
 Dropdown portDD, baudDD, plotDD, lineEndDD;  // the four dropdown menus
 Dropdown[] dds;                  // puts all dropdowns in one list so we can handle them together
-Button rescanBtn, connectBtn, clearBtn, copyBtn, sendBtn;  // the clickable buttons
+Button rescanBtn, connectBtn, clearBtn, copyBtn, sendBtn, loadBtn, shotBtn;  // the clickable buttons
 Checkbox timeStampCB, autoScrollCB, plotCB;  // the three tick boxes
 
 // A simple class: a template for one line in the log.
@@ -160,7 +177,8 @@ class LogLine {
   String text;                   // the words shown on that line
   boolean sys;                   // true = notice from this program, not device data
   boolean sent = false;          // true = text you sent to the device
-
+  long sample = -1;               // plot sample number this line produced (-1 = not plotted)
+  
   // Constructor: runs when we create a new LogLine.
   LogLine(String t, boolean s) { text = t; sys = s; }
 }
@@ -215,6 +233,8 @@ void setup() {
   clearBtn = new Button(690, 10, 70, 28, "Clear");
   copyBtn = new Button(770, 10, 70, 28, "Copy");
   sendBtn = new Button(820, sendY + 5, 70, 26, "Send");
+  loadBtn = new Button(690, 43, 70, 26, "Load");
+  shotBtn = new Button(770, 43, 120, 26, "Screen Shot");
 
   // Create the tick boxes and set their starting values.
   timeStampCB = new Checkbox(10, 48, "Timestamp");
@@ -249,6 +269,12 @@ void draw() {
 
   readSerial();                          // check for new data from the device
 
+  if (pendingLoad != null) {             // a file was chosen in the dialog
+    File f = pendingLoad;
+    pendingLoad = null;
+    if (!connected) loadLogFile(f);
+  }
+
   if (selecting) {                       // dragging a selection: scroll if the mouse leaves the log
     if (mouseY < logTop) scrollTo(firstLine - 1);
     else if (mouseY > logTop + logH) scrollTo(firstLine + 1);
@@ -274,6 +300,10 @@ void draw() {
   cursor((overGrip() || resizing) ? MOVE : (legendHit() >= 0 ? HAND : (sendFieldOver() ? TEXT : ARROW)));
 
   for (Dropdown d : dds) d.drawList();   // open lists are drawn last so they sit on top
+  if (shotPending) {                     // capture only after everything has been drawn
+    shotPending = false;
+    screenShotToClipboard();
+  }
 }
 
 // =====================================================================
@@ -324,7 +354,8 @@ void readSerial() {
 
 // Add one received line to the log, CSV file, and plot.
 void addDataLine(String line) {
-  parsePlot(line);                       // plot uses the raw line, without any timestamp
+  long before = plotTotal;
+  parsePlot(line, millis());                       // plot uses the raw line, without any timestamp
 
   String s = line;                       // start with the original text
 
@@ -334,7 +365,9 @@ void addDataLine(String line) {
   }
 
   if (output != null) output.println(s);       // save the line to the CSV file
-  log.add(new LogLine(s, false));              // show the line in the log window
+  LogLine ll = new LogLine(s, false);
+  if (plotTotal > before) ll.sample = before;  // this line became plot sample number "before"
+  log.add(ll);                                 // show the line in the log window
 }
 
 // Add a message from this program, shown in orange with square brackets.
@@ -401,6 +434,15 @@ void connect() {
 
   rx.setLength(0);                             // start with no half-finished incoming line
   lastRx = millis();
+  
+  if (reviewing) {                       // leave review mode: start from a clean log
+    log.clear();
+    clearSel();
+    firstLine = 0;
+    autoScrollCB.checked = true;
+    reviewing = false;
+  }
+  
   resetPlot(true);                       // new session = fresh plot
   connected = true;                            // remember that we are connected
 
@@ -430,6 +472,77 @@ void disconnect() {
   rescanBtn.enabled = true;
 }
 
+// Called by Processing (on another thread) when the file dialog closes.
+// We only remember the choice; draw() does the loading on the main thread.
+void fileSelected(File selection) {
+  if (selection == null) return;               // dialog was cancelled
+  pendingLoad = selection;
+}
+
+// Read a saved log file into the scrolling log and the plot.
+void loadLogFile(File f) {
+  String lower = f.getName().toLowerCase();
+  if (!(lower.endsWith(".csv") || lower.endsWith(".txt") || lower.endsWith(".log"))) {
+    flash("Not loaded: expected a .csv, .txt or .log file.");
+    return;
+  }
+  String[] lines = loadStrings(f);
+  if (lines == null) {
+    sysMsg("Could not read " + f.getName());
+    return;
+  }
+
+  log.clear();
+  clearSel();
+  resetPlot(true);                             // new data, so forget old channel names
+
+  int dayAdd = 0, lastSod = -1;                // for time stamps that cross midnight
+  int nStamped = 0;
+
+  for (String raw : lines) {
+    if (raw.length() == 0) continue;
+
+    String body = raw;                         // the part used for plotting
+    int ms = -1;
+
+    // Lines saved with Timestamp on start with "HH:MM:SS, "
+    if (raw.matches("\\d\\d:\\d\\d:\\d\\d, .*")) {
+      int sod = Integer.parseInt(raw.substring(0, 2)) * 3600
+              + Integer.parseInt(raw.substring(3, 5)) * 60
+              + Integer.parseInt(raw.substring(6, 8));   // seconds since midnight
+      if (lastSod >= 0 && sod < lastSod - 43200) dayAdd += 86400;  // passed midnight
+      lastSod = sod;
+      ms = (sod + dayAdd) * 1000;
+      body = raw.substring(10);                // strip the time stamp
+      nStamped++;
+    }
+
+    LogLine l = new LogLine(raw, false);
+    if (body.startsWith("> ")) {
+      l.sent = true;                           // a message that was sent: show blue, don't plot
+    } else {
+      if (ms < 0) ms = (int) (plotTotal * 1000);   // no time stamps: 1 sample = 1 "second"
+      long before = plotTotal;
+      parsePlot(body, ms);
+      if (plotTotal > before) l.sample = before;
+    }
+    log.add(l);
+  }
+
+  reviewing = true;
+  loadedPath = f.getAbsolutePath();
+  loadedName = f.getName();
+  autoScrollCB.checked = false;                // start at the top of the file
+  firstLine = 0;
+  plotDD.sel = plotWindows.length - 1;         // show as much of the file as possible
+  updateLayout();
+
+  String m = "Loaded " + (log.size()) + " lines from " + f.getName() + "; plotted " + plotTotal + " samples.";
+  if (plotTotal > plotCap) m += " Only the last " + plotCap + " fit in the plot.";
+  if (plotTotal > 0 && nStamped == 0) m += " No time stamps found, so derivatives are per sample.";
+  log.add(0, new LogLine("[" + m + "]", true));
+}
+
 // Change the serial speed while still connected.
 void changeBaud() {
   if (!connected) return;                      // only works if already connected
@@ -455,6 +568,7 @@ void changeBaud() {
 
 // Clear the plot data. If clearNames is true, also forget channel names.
 void resetPlot(boolean clearNames) {
+  markSample = -1;
   plotTotal = 0;                               // no samples received yet
   nCh = 0;                                     // no channels seen yet
   if (clearNames) {
@@ -474,9 +588,13 @@ int sampleMs(long absIdx) {
 }
 
 // Is channel c currently being shown as a derivative?
-// It needs both its own tick box AND the Timestamp box to be ticked.
+// Derivatives need real time stamps: either the Timestamp box (live) or a loaded file.
+boolean derivAllowed() {
+  return timeStampCB.checked || reviewing;
+}
+
 boolean derivOn(int c) {
-  return chDeriv[c] && timeStampCB.checked;
+  return chDeriv[c] && derivAllowed();
 }
 
 // Is at least one visible channel being shown as a derivative?
@@ -517,7 +635,7 @@ float plotVal(int c, long absIdx) {
 }
 
 // Turn one incoming text line into numbers for the plot.
-void parsePlot(String line) {
+void parsePlot(String line, int ms) {
   // Does the line use commas or semicolons to separate values?
   boolean delim = line.indexOf(',') >= 0 || line.indexOf(';') >= 0;
 
@@ -569,7 +687,7 @@ void parsePlot(String line) {
   for (int c = 0; c < maxCh; c++) {
     plotBuf[c][idx] = (c < n) ? vals[c] : Float.NaN;
   }
-  plotMs[idx] = millis();                      // remember when this sample arrived (for derivatives)
+  plotMs[idx] = ms;                      // remember when this sample arrived (for derivatives)
 
   // Give each channel a name if it does not already have one.
   for (int c = 0; c < n; c++) {
@@ -682,6 +800,7 @@ float yPix(int c, float v, int py, int ph) {
 
 // Draw the live graph.
 void drawPlot() {
+  plotReady = false;                           // set true below once the plot is really drawn
   if (!plotCB.checked) return;                 // do nothing if the Plot box is unchecked
 
   int top = toolbarH;                          // plot starts below the toolbar
@@ -704,6 +823,7 @@ void drawPlot() {
 
   textFont(fontUI, 12);
   int win = plotWindows[plotDD.sel];           // how many samples to display
+  if (reviewing) win = max(2, (int) min((long) win, plotTotal));  // loaded file fills the width  
   int n = (int) min((long) win, plotTotal);    // cannot show more samples than we have
 
   if (n == 0 || nCh == 0) {
@@ -825,6 +945,17 @@ void drawPlot() {
   strokeWeight(1);
   noClip();                                    // stop limiting drawing to the graph box
 
+  gPx = px; gPy = py; gPw = pw; gPh = ph;      // remember the layout for click detection
+  gN = n; gWin = win; gStart = start;
+  plotReady = true;
+
+  if (markSample >= start && markSample < start + n) {   // marker for the clicked sample
+    float mx = px + pw * (markSample - start) / (float) max(1, win - 1);
+    stroke(0, 90);
+    line(mx, py, mx, py + ph);
+    noStroke();
+  }
+
   drawLegend();                          // latest value of each channel; click to hide/show
   drawHoverTip(px, py, pw, ph, start, n, win);   // tooltip for the point under the mouse
 
@@ -834,7 +965,7 @@ void drawPlot() {
   textAlign(LEFT, TOP);
   text("Window: " + win + " samples", px, py + ph + 6);
   textAlign(RIGHT, TOP);
-  text("Samples received: " + plotTotal, px + pw, py + ph + 6);
+  text((reviewing ? "Samples loaded: " : "Samples received: ") + plotTotal, px + pw, py + ph + 6);
   textFont(fontUI, 14);
 }
 
@@ -920,6 +1051,58 @@ void drawHoverTip(int px, int py, int pw, int ph, long start, int n, int win) {
   text(l2, bx + 8, by + 27);
 }
 
+// Which sample (absolute number) is under the mouse on the plot? Returns -1 if none.
+// Uses the same "nearest visible point within hoverRadius" rule as the tooltip.
+long sampleAtMouse() {
+  if (!plotReady) return -1;
+  if (mouseX < gPx || mouseX > gPx + gPw || mouseY < gPy || mouseY > gPy + gPh) return -1;
+
+  float dx = gPw / (float) max(1, gWin - 1);
+  int kMid = round((mouseX - gPx) / dx);
+  int span = min(gN, ceil(hoverRadius / dx));
+
+  float best = hoverRadius;
+  int bestK = -1;
+  for (int k = max(0, kMid - span); k <= min(gN - 1, kMid + span); k++) {
+    float x = gPx + dx * k;
+    for (int c = 0; c < nCh; c++) {
+      if (chHidden[c]) continue;
+      float v = plotVal(c, gStart + k);
+      if (Float.isNaN(v)) continue;
+      float gap = dist(mouseX, mouseY, x, yPix(c, v, gPy, gPh));
+      if (gap < best) { best = gap; bestK = k; }
+    }
+  }
+  return bestK < 0 ? -1 : gStart + bestK;
+}
+
+// Find the log line that produced a given sample. Searches from the newest line backwards.
+int lineOfSample(long s) {
+  for (int i = log.size() - 1; i >= 0; i--) {
+    LogLine l = log.get(i);
+    if (l.sys && l.text.startsWith("[Connected to")) break;  // don't wander into an older session
+    if (l.sample < 0) continue;                // notices, sent text, headers: no sample
+    if (l.sample == s) return i;
+    if (l.sample < s) break;                   // gone past where it should be: it was trimmed
+  }
+  return -1;
+}
+
+// Scroll the log to the line behind a plot sample and highlight it.
+void jumpToSample(long s) {
+  int i = lineOfSample(s);
+  if (i < 0) {
+    flash("That line is no longer in the log window.");
+    return;
+  }
+  markSample = s;
+  selAL = i;  selAC = 0;                       // reuse the text selection as the highlight
+  selBL = i;  selBC = log.get(i).text.length();
+  selecting = false;
+  autoScrollCB.checked = false;                // stay put instead of chasing new lines
+  scrollTo(i - visibleLines() / 2);            // centre the line on screen
+}
+
 // ---------------- Plot legend ----------------
 // Each entry has: a small tick box (show d/dt), a colour swatch, and a label.
 // Click the tick box to switch that channel to its derivative.
@@ -968,7 +1151,7 @@ boolean allChannelsHidden() {
 void drawLegend() {
   int lx = legendX();
   int hov = legendHit();                       // which entry is the mouse over?
-  boolean tsOn = timeStampCB.checked;          // derivative tick boxes only work with timestamps
+  boolean tsOn = derivAllowed();         // derivative tick boxes need time stamps
 
   if (nCh > 0) {                         // small heading above the tick boxes
     noStroke();
@@ -1105,8 +1288,11 @@ void drawToolbar() {
   rescanBtn.show();
   baudDD.drawBox();
   connectBtn.show();
+  loadBtn.enabled = !connected;          // loading is for review, not while logging live
+  loadBtn.show();
   clearBtn.show();
   copyBtn.show();
+  shotBtn.show();
   timeStampCB.show();
   autoScrollCB.show();
   plotCB.show();
@@ -1127,10 +1313,10 @@ void drawStatus() {
 
   // Show connection information, or "Not connected".
   String l1 = connected ? "Connected: " + portName + " @ " + baudRates[baudDD.sel] + " bps"
-                        : "Not connected";
+            : (reviewing ? "Reviewing: " + loadedName : "Not connected");
 
-  // Show the CSV file being written, or explain that none exists yet.
-  String l2 = filename.length() == 0 ? "Log file: (created when you connect)"
+  String l2 = (reviewing && !connected) ? "Loaded file: " + loadedPath
+            : filename.length() == 0 ? "Log file: (created when you connect)"
             : (connected ? "Logging to: " : "Last log file: ") + sketchPath(filename + ".csv");
 
   text(l1, pad, y0 + 13);
@@ -1202,12 +1388,20 @@ void mousePressed() {
   }
 
   if (copyBtn.over()) { doCopy(); return; }
+  
+  if (shotBtn.over()) { shotPending = true; return; }
+  
+  if (loadBtn.enabled && loadBtn.over()) {
+    selectInput("Select a log file to load", "fileSelected", new File(sketchPath("")));
+    return;
+  }
 
   if (clearBtn.over()) {
     log.clear();                               // remove all lines from the screen
     clearSel();
     firstLine = 0;
     resetPlot(false);                    // keep channel names
+    reviewing = false;
     return;
   }
 
@@ -1229,7 +1423,7 @@ void mousePressed() {
   // Derivative tick box in the legend (only works while Timestamp is ticked)
   int tick = tickHit();
   if (tick >= 0) {
-    if (timeStampCB.checked) {
+    if (derivAllowed()) {
       chDeriv[tick] = !chDeriv[tick];          // switch between raw value and d/dt
     } else {
       flash("Tick Timestamp to plot derivatives.");
@@ -1241,6 +1435,13 @@ void mousePressed() {
   int hit = legendHit();
   if (hit >= 0) {
     chHidden[hit] = !chHidden[hit];            // switch hidden/visible
+    return;
+  }
+
+  // Plot: click a data point to jump to its line in the log
+  long hitS = sampleAtMouse();
+  if (hitS >= 0) {
+    jumpToSample(hitS);
     return;
   }
 
@@ -1394,6 +1595,37 @@ void copyToClipboard(String s) {
     Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(s), null);
   } catch (Exception e) {
     flash("Could not access the clipboard.");
+  }
+}
+
+// Lets the clipboard carry a picture instead of text.
+class ImageSelection implements Transferable {
+  java.awt.Image img;
+  ImageSelection(java.awt.Image i) { img = i; }
+
+  public DataFlavor[] getTransferDataFlavors() {
+    return new DataFlavor[] { DataFlavor.imageFlavor };
+  }
+  public boolean isDataFlavorSupported(DataFlavor f) {
+    return DataFlavor.imageFlavor.equals(f);
+  }
+  public Object getTransferData(DataFlavor f) throws UnsupportedFlavorException {
+    if (!isDataFlavorSupported(f)) throw new UnsupportedFlavorException(f);
+    return img;
+  }
+}
+
+// Copy a picture of the whole window to the clipboard.
+void screenShotToClipboard() {
+  try {
+    loadPixels();                              // grab what is on screen right now
+    int w = pixelWidth, h = pixelHeight;       // real pixel size (larger on high-resolution screens)
+    BufferedImage bi = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+    bi.setRGB(0, 0, w, h, pixels, 0, w);       // copy the pixels into the picture
+    Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new ImageSelection(bi), null);
+    flash("Screenshot copied to clipboard");
+  } catch (Exception e) {
+    flash("Could not copy the screenshot.");
   }
 }
 
